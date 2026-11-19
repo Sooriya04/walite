@@ -1,0 +1,7 @@
+.DS_Store
+*.log
+*.index
+*.meta
+/bin/
+/dist/
+data/
