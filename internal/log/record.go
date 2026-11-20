@@ -1,7 +1,7 @@
 // Package: log
 // File: record.go
 // Core Work: Defines the in-memory Record representation, zero-allocation binary wire serialization, and header inspection.
-// Exported: Record, HeaderSize, EncodeRecord, DecodeRecord, ParseHeaderLengths, ErrCorruptRecord, ErrTruncatedRecord
+// Exported: Record, HeaderSize, MaxRecordPayload, EncodeRecord, DecodeRecord, ParseHeaderLengths, ErrCorruptRecord, ErrTruncatedRecord, ErrRecordTooLarge
 
 package log
 
@@ -17,11 +17,18 @@ var (
 
 	// ErrTruncatedRecord is returned when the byte slice is shorter than the minimum header or declared length.
 	ErrTruncatedRecord = errors.New("walite: truncated record bytes")
+
+	// ErrRecordTooLarge is returned when key or value length exceeds MaxRecordPayload.
+	ErrRecordTooLarge = errors.New("walite: record payload exceeds maximum limit of 64MB")
 )
 
 // HeaderSize is the fixed byte overhead of a record on disk:
 // Offset (8B) + Timestamp (8B) + CRC32 (4B) + KeyLen (4B) + ValLen (4B) = 28 Bytes.
 const HeaderSize = 28
+
+// MaxRecordPayload defines the maximum allowable size (64MB) for a record's key and value combined.
+// This bounds memory allocation during serialization and recovery, preventing adversarial OOM crashes.
+const MaxRecordPayload = 64 * 1024 * 1024
 
 // ParseHeaderLengths extracts keyLen and valLen from a 28-byte header slice without decoding the full record.
 func ParseHeaderLengths(header []byte) (int, int, error) {
@@ -30,6 +37,9 @@ func ParseHeaderLengths(header []byte) (int, int, error) {
 	}
 	keyLen := int(binary.BigEndian.Uint32(header[20:24]))
 	valLen := int(binary.BigEndian.Uint32(header[24:28]))
+	if uint64(keyLen)+uint64(valLen) > MaxRecordPayload {
+		return 0, 0, ErrRecordTooLarge
+	}
 	return keyLen, valLen, nil
 }
 
@@ -96,6 +106,10 @@ func DecodeRecord(src []byte) (*Record, int, error) {
 	expectedChecksum := binary.BigEndian.Uint32(src[16:20])
 	keyLen := int(binary.BigEndian.Uint32(src[20:24]))
 	valLen := int(binary.BigEndian.Uint32(src[24:28]))
+
+	if uint64(keyLen)+uint64(valLen) > MaxRecordPayload {
+		return nil, 0, ErrRecordTooLarge
+	}
 
 	totalLen := HeaderSize + keyLen + valLen
 	if len(src) < totalLen {

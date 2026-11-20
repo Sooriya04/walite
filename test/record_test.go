@@ -7,6 +7,7 @@ package test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 	"time"
 
@@ -102,9 +103,9 @@ func TestRecord_BitFlipCorruption(t *testing.T) {
 		corrupted[i] ^= 0xFF
 
 		_, _, err := log.DecodeRecord(corrupted)
-		// If keyLen or valLen byte was corrupted to exceed buffer capacity, ErrTruncatedRecord is valid;
-		// otherwise, CRC mismatch produces ErrCorruptRecord. Neither should ever succeed.
-		if err != log.ErrCorruptRecord && err != log.ErrTruncatedRecord {
+		// If keyLen or valLen byte was corrupted to exceed buffer capacity, ErrTruncatedRecord or ErrRecordTooLarge is valid;
+		// otherwise, CRC mismatch produces ErrCorruptRecord. None should ever succeed.
+		if err != log.ErrCorruptRecord && err != log.ErrTruncatedRecord && err != log.ErrRecordTooLarge {
 			t.Fatalf("byte %d was corrupted but DecodeRecord returned unexpected err: %v", i, err)
 		}
 	}
@@ -127,6 +128,26 @@ func TestRecord_TruncatedSafety(t *testing.T) {
 		if err != log.ErrTruncatedRecord {
 			t.Fatalf("truncated slice of length %d should return ErrTruncatedRecord, got: %v", i, err)
 		}
+	}
+}
+
+func TestRecord_PayloadLimit(t *testing.T) {
+	header := make([]byte, log.HeaderSize)
+	binary.BigEndian.PutUint32(header[20:24], 1024)
+	binary.BigEndian.PutUint32(header[24:28], uint32(log.MaxRecordPayload))
+
+	// Total exceeds MaxRecordPayload
+	_, _, err := log.ParseHeaderLengths(header)
+	if err != log.ErrRecordTooLarge {
+		t.Fatalf("expected ErrRecordTooLarge from ParseHeaderLengths, got %v", err)
+	}
+
+	src := make([]byte, log.HeaderSize+16)
+	binary.BigEndian.PutUint32(src[20:24], 0)
+	binary.BigEndian.PutUint32(src[24:28], uint32(log.MaxRecordPayload+1))
+	_, _, err = log.DecodeRecord(src)
+	if err != log.ErrRecordTooLarge {
+		t.Fatalf("expected ErrRecordTooLarge from DecodeRecord, got %v", err)
 	}
 }
 
