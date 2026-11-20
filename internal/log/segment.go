@@ -68,6 +68,10 @@ func OpenSegment(cfg SegmentConfig) (*Segment, error) {
 		cfg.IndexIntervalBytes = DefaultIndexIntervalBytes
 	}
 
+	if err := os.MkdirAll(cfg.Directory, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create segment directory: %w", err)
+	}
+
 	logPath := filepath.Join(cfg.Directory, FormatSegmentFileName(cfg.BaseOffset, ".log"))
 	indexPath := filepath.Join(cfg.Directory, FormatSegmentFileName(cfg.BaseOffset, ".index"))
 
