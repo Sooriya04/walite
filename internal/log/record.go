@@ -73,10 +73,8 @@ func EncodeRecord(dst []byte, r *Record) []byte {
 	}
 
 	// Compute CRC32 over Offset(8) + Timestamp(8) + KeyLen(4) + ValLen(4) + Key + Value
-	crc := crc32.NewIEEE()
-	crc.Write(dst[0:16])
-	crc.Write(dst[20:totalLen])
-	checksum := crc.Sum32()
+	c := crc32.ChecksumIEEE(dst[0:16])
+	checksum := crc32.Update(c, crc32.IEEETable, dst[20:totalLen])
 
 	// Store CRC32 in bytes 16..20
 	binary.BigEndian.PutUint32(dst[16:20], checksum)
@@ -103,10 +101,8 @@ func DecodeRecord(src []byte) (*Record, int, error) {
 	}
 
 	// Verify CRC32 checksum integrity
-	crc := crc32.NewIEEE()
-	crc.Write(src[0:16])
-	crc.Write(src[20:totalLen])
-	actualChecksum := crc.Sum32()
+	c := crc32.ChecksumIEEE(src[0:16])
+	actualChecksum := crc32.Update(c, crc32.IEEETable, src[20:totalLen])
 
 	if actualChecksum != expectedChecksum {
 		return nil, 0, ErrCorruptRecord

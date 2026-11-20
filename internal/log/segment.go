@@ -92,6 +92,18 @@ func (s *Segment) BaseOffset() uint64 {
 	return s.baseOffset
 }
 
+// NextSegmentConfig generates a SegmentConfig for the subsequent contiguous segment.
+func (s *Segment) NextSegmentConfig(maxBytes uint64, indexInterval uint32) SegmentConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return SegmentConfig{
+		BaseOffset:         s.nextOffset,
+		MaxBytes:           maxBytes,
+		IndexIntervalBytes: indexInterval,
+		Directory:          filepath.Dir(s.logFile.Name()),
+	}
+}
+
 // NextOffset returns the next absolute offset that will be assigned to a new record.
 func (s *Segment) NextOffset() uint64 {
 	s.mu.RLock()
@@ -124,6 +136,10 @@ func (s *Segment) Append(rec *Record) (uint64, error) {
 
 	if s.closed {
 		return 0, os.ErrClosed
+	}
+
+	if rec.Offset != 0 && rec.Offset < s.baseOffset {
+		return 0, ErrOffsetPrecedesBase
 	}
 
 	rec.Offset = s.nextOffset
@@ -316,6 +332,15 @@ func (s *Segment) recoverAndSync() error {
 		if err := s.index.Truncate(validIdxCount); err != nil {
 			return fmt.Errorf("failed to align index with truncated log: %w", err)
 		}
+	}
+
+	if validIdxCount > 0 {
+		lastEntry, err := s.index.ReadAt(validIdxCount - 1)
+		if err == nil {
+			s.bytesSinceIdx = uint32(s.curBytes - uint64(lastEntry.Position))
+		}
+	} else {
+		s.bytesSinceIdx = uint32(s.curBytes)
 	}
 
 	return nil

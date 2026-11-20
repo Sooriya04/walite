@@ -207,3 +207,70 @@ func TestSegment_TornWriteCrashRecovery(t *testing.T) {
 		t.Fatalf("expected new append offset 53, got %d", newOffset)
 	}
 }
+
+func TestSegment_OffsetPrecedesBase(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset:         500,
+		MaxBytes:           1024 * 1024,
+		IndexIntervalBytes: 128,
+		Directory:          tempDir,
+	}
+
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed to open segment: %v", err)
+	}
+	defer seg.Close()
+
+	// Explicitly specifying an offset lower than baseOffset must fail
+	rec := &log.Record{
+		Offset:    499,
+		Timestamp: 1000,
+		Key:       []byte("k"),
+		Value:     []byte("v"),
+	}
+
+	_, err = seg.Append(rec)
+	if err != log.ErrOffsetPrecedesBase {
+		t.Fatalf("expected ErrOffsetPrecedesBase, got %v", err)
+	}
+}
+
+func TestSegment_NextSegmentConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset:         100,
+		MaxBytes:           1024 * 1024,
+		IndexIntervalBytes: 128,
+		Directory:          tempDir,
+	}
+
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed to open segment: %v", err)
+	}
+	defer seg.Close()
+
+	for i := 0; i < 5; i++ {
+		_, err := seg.Append(&log.Record{
+			Timestamp: 1000,
+			Key:       []byte("k"),
+			Value:     []byte("v"),
+		})
+		if err != nil {
+			t.Fatalf("append %d failed: %v", i, err)
+		}
+	}
+
+	nextCfg := seg.NextSegmentConfig(2*1024*1024, 256)
+	if nextCfg.BaseOffset != 105 {
+		t.Fatalf("expected next base offset 105, got %d", nextCfg.BaseOffset)
+	}
+	if nextCfg.MaxBytes != 2*1024*1024 {
+		t.Fatalf("expected next MaxBytes 2MB, got %d", nextCfg.MaxBytes)
+	}
+	if nextCfg.IndexIntervalBytes != 256 {
+		t.Fatalf("expected next IndexIntervalBytes 256, got %d", nextCfg.IndexIntervalBytes)
+	}
+}
