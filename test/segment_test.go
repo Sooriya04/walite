@@ -506,6 +506,36 @@ func TestSegment_ConcurrentAppendAndTailRead(t *testing.T) {
 	wg.Wait()
 }
 
+func TestSegment_NestedDirectoryBootstrap(t *testing.T) {
+	tempDir := t.TempDir()
+	nestedDir := filepath.Join(tempDir, "topics", "orders", "partition-0")
+
+	cfg := log.SegmentConfig{
+		BaseOffset:         100,
+		MaxBytes:           1024 * 1024,
+		IndexIntervalBytes: 4096,
+		Directory:          nestedDir,
+	}
+
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("expected OpenSegment to create nested directory successfully, got %v", err)
+	}
+	defer seg.Close()
+
+	offset, err := seg.Append(&log.Record{
+		Timestamp: 1000,
+		Key:       []byte("key"),
+		Value:     []byte("val"),
+	})
+	if err != nil {
+		t.Fatalf("failed append in bootstrapped directory: %v", err)
+	}
+	if offset != 100 {
+		t.Fatalf("expected offset 100, got %d", offset)
+	}
+}
+
 func BenchmarkSegment_Append(b *testing.B) {
 	tempDir := b.TempDir()
 	cfg := log.SegmentConfig{
