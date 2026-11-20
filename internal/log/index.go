@@ -37,15 +37,16 @@ type IndexEntry struct {
 }
 
 // Index provides thread-safe append and binary-search lookup operations over
-// an append-only, fixed-size entry index file on disk.
+// an append-only, fixed-size entry index file on disk, backed by an in-memory
+// entry cache for zero-syscall lookups.
 type Index struct {
-	mu   sync.RWMutex
-	file *os.File
-	size uint32 // count of entries in the index
+	mu      sync.RWMutex
+	file    *os.File
+	entries []IndexEntry
 }
 
 // OpenIndex opens or creates an index file at the specified path.
-// It validates that existing files have sizes aligned to 8-byte boundaries.
+// It validates that existing files have sizes aligned to 8-byte boundaries and loads entries into memory.
 func OpenIndex(path string) (*Index, error) {
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
@@ -64,9 +65,26 @@ func OpenIndex(path string) (*Index, error) {
 		return nil, ErrIndexCorrupt
 	}
 
+	count := fileSize / EntrySize
+	entries := make([]IndexEntry, count)
+	if count > 0 {
+		buf := make([]byte, fileSize)
+		if _, err := file.ReadAt(buf, 0); err != nil && err != io.EOF {
+			_ = file.Close()
+			return nil, fmt.Errorf("failed to read index entries into memory: %w", err)
+		}
+		for i := int64(0); i < count; i++ {
+			off := i * EntrySize
+			entries[i] = IndexEntry{
+				RelativeOffset: binary.BigEndian.Uint32(buf[off : off+4]),
+				Position:       binary.BigEndian.Uint32(buf[off+4 : off+8]),
+			}
+		}
+	}
+
 	return &Index{
-		file: file,
-		size: uint32(fileSize / EntrySize),
+		file:    file,
+		entries: entries,
 	}, nil
 }
 
@@ -74,7 +92,7 @@ func OpenIndex(path string) (*Index, error) {
 func (idx *Index) EntriesCount() uint32 {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	return idx.size
+	return uint32(len(idx.entries))
 }
 
 // WriteEntry appends a new (relativeOffset, position) entry to the index file.
@@ -95,7 +113,10 @@ func (idx *Index) WriteEntry(relativeOffset, position uint32) error {
 		return io.ErrShortWrite
 	}
 
-	idx.size++
+	idx.entries = append(idx.entries, IndexEntry{
+		RelativeOffset: relativeOffset,
+		Position:       position,
+	})
 	return nil
 }
 
@@ -104,78 +125,41 @@ func (idx *Index) ReadAt(entryIdx uint32) (IndexEntry, error) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	return idx.readAtLocked(entryIdx)
-}
-
-func (idx *Index) readAtLocked(entryIdx uint32) (IndexEntry, error) {
-	if entryIdx >= idx.size {
+	if int(entryIdx) >= len(idx.entries) {
 		return IndexEntry{}, io.EOF
 	}
-
-	var buf [EntrySize]byte
-	offset := int64(entryIdx) * EntrySize
-	n, err := idx.file.ReadAt(buf[:], offset)
-	if err != nil && err != io.EOF {
-		return IndexEntry{}, fmt.Errorf("failed to read index entry at %d: %w", entryIdx, err)
-	}
-	if n < EntrySize {
-		return IndexEntry{}, io.ErrUnexpectedEOF
-	}
-
-	return IndexEntry{
-		RelativeOffset: binary.BigEndian.Uint32(buf[0:4]),
-		Position:       binary.BigEndian.Uint32(buf[4:8]),
-	}, nil
+	return idx.entries[entryIdx], nil
 }
 
-// Lookup performs a binary search over the sorted index to locate the highest
-// index entry whose RelativeOffset is <= targetRelOffset.
-// This allows the segment scanner to jump directly to the closest predecessor position on disk.
+// Lookup performs a binary search over the cached in-memory index to locate the highest
+// index entry whose RelativeOffset is <= targetRelOffset in O(log N) user-space steps without disk I/O.
 func (idx *Index) Lookup(targetRelOffset uint32) (IndexEntry, error) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	if idx.size == 0 {
+	n := len(idx.entries)
+	if n == 0 || targetRelOffset < idx.entries[0].RelativeOffset {
 		return IndexEntry{}, ErrIndexOutOfBounds
 	}
 
-	firstEntry, err := idx.readAtLocked(0)
-	if err != nil {
-		return IndexEntry{}, err
-	}
-	if targetRelOffset < firstEntry.RelativeOffset {
-		return IndexEntry{}, ErrIndexOutOfBounds
-	}
-
-	low := uint32(0)
-	high := idx.size - 1
-	bestIdx := uint32(0)
+	low := 0
+	high := n - 1
+	bestIdx := 0
 
 	for low <= high {
 		mid := low + (high-low)/2
-		entry, err := idx.readAtLocked(mid)
-		if err != nil {
-			return IndexEntry{}, err
-		}
-
-		if entry.RelativeOffset <= targetRelOffset {
+		if idx.entries[mid].RelativeOffset <= targetRelOffset {
 			bestIdx = mid
-			if mid == ^uint32(0) { // prevent overflow check
-				break
-			}
 			low = mid + 1
 		} else {
-			if mid == 0 {
-				break
-			}
 			high = mid - 1
 		}
 	}
 
-	return idx.readAtLocked(bestIdx)
+	return idx.entries[bestIdx], nil
 }
 
-// Truncate resizes the index to contain exactly count entries, truncating physical file size.
+// Truncate resizes the index to contain exactly count entries, truncating physical file size and memory cache.
 func (idx *Index) Truncate(count uint32) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -189,7 +173,9 @@ func (idx *Index) Truncate(count uint32) error {
 		return fmt.Errorf("failed to seek index after truncate: %w", err)
 	}
 
-	idx.size = count
+	if int(count) < len(idx.entries) {
+		idx.entries = idx.entries[:count]
+	}
 	return nil
 }
 

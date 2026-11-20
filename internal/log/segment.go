@@ -39,9 +39,10 @@ type Segment struct {
 	bytesSinceIdx uint32
 	curBytes      uint64
 
-	logFile *os.File
-	index   *Index
-	closed  bool
+	logFile   *os.File
+	index     *Index
+	closed    bool
+	appendBuf []byte
 }
 
 // FormatSegmentFileName formats a 64-bit base offset into a 20-digit zero-padded filename with the given extension.
@@ -127,9 +128,9 @@ func (s *Segment) Append(rec *Record) (uint64, error) {
 	}
 
 	rec.Offset = s.nextOffset
-	encoded := EncodeRecord(nil, rec)
+	s.appendBuf = EncodeRecord(s.appendBuf[:0], rec)
 
-	encodedLen := uint64(len(encoded))
+	encodedLen := uint64(len(s.appendBuf))
 	if s.maxBytes > 0 && (s.curBytes+encodedLen) > s.maxBytes {
 		return 0, ErrSegmentFull
 	}
@@ -145,11 +146,11 @@ func (s *Segment) Append(rec *Record) (uint64, error) {
 		s.bytesSinceIdx = 0
 	}
 
-	n, err := s.logFile.Write(encoded)
+	n, err := s.logFile.Write(s.appendBuf)
 	if err != nil {
 		return 0, fmt.Errorf("failed to write record to log: %w", err)
 	}
-	if n != len(encoded) {
+	if n != len(s.appendBuf) {
 		return 0, io.ErrShortWrite
 	}
 
@@ -201,12 +202,16 @@ func (s *Segment) ReadAt(targetOffset uint64) (*Record, error) {
 
 		totalRecordLen := int64(HeaderSize + keyLen + valLen)
 		fullBuf := make([]byte, totalRecordLen)
-		n, err = s.logFile.ReadAt(fullBuf, curPos)
-		if err != nil && err != io.EOF {
-			return nil, fmt.Errorf("failed to read full record at pos %d: %w", curPos, err)
-		}
-		if int64(n) < totalRecordLen {
-			return nil, io.ErrUnexpectedEOF
+		copy(fullBuf[:HeaderSize], headerBuf)
+
+		if totalRecordLen > HeaderSize {
+			n, err = s.logFile.ReadAt(fullBuf[HeaderSize:], curPos+HeaderSize)
+			if err != nil && err != io.EOF {
+				return nil, fmt.Errorf("failed to read payload at pos %d: %w", curPos+HeaderSize, err)
+			}
+			if int64(n) < totalRecordLen-HeaderSize {
+				return nil, io.ErrUnexpectedEOF
+			}
 		}
 
 		rec, _, err := DecodeRecord(fullBuf)
