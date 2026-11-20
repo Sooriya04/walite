@@ -593,6 +593,65 @@ func TestSegment_OffsetRegressionRecovery(t *testing.T) {
 	}
 }
 
+func TestSegment_LaggedIndexBackfillRecovery(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset:         0,
+		MaxBytes:           1024 * 1024,
+		IndexIntervalBytes: 100, // Small interval to trigger multiple entries
+		Directory:          tempDir,
+	}
+
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed to open segment: %v", err)
+	}
+
+	// Write enough records to generate at least 4 index entries
+	payload := make([]byte, 50)
+	for i := 0; i < 10; i++ {
+		_, err := seg.Append(&log.Record{
+			Timestamp: 1000,
+			Key:       []byte("key"),
+			Value:     payload,
+		})
+		if err != nil {
+			t.Fatalf("failed append %d: %v", i, err)
+		}
+	}
+
+	initialEntries := seg.IndexEntriesCount()
+	if initialEntries < 3 {
+		t.Fatalf("expected at least 3 index entries, got %d", initialEntries)
+	}
+
+	if err := seg.Close(); err != nil {
+		t.Fatalf("failed close: %v", err)
+	}
+
+	// Artificially truncate index to simulate lag where only the first entry was flushed
+	indexPath := filepath.Join(tempDir, log.FormatSegmentFileName(0, ".index"))
+	idxFile, err := os.OpenFile(indexPath, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("failed open index: %v", err)
+	}
+	if err := idxFile.Truncate(8); err != nil { // Keep only 1 entry (8 bytes)
+		t.Fatalf("failed truncate index: %v", err)
+	}
+	idxFile.Close()
+
+	// Reopen segment: should detect lagged index and backfill missing entries
+	reopened, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("reopen failed: %v", err)
+	}
+	defer reopened.Close()
+
+	if reopened.IndexEntriesCount() != initialEntries {
+		t.Fatalf("expected recovered index entries count %d, got %d", initialEntries, reopened.IndexEntriesCount())
+	}
+}
+
 func BenchmarkSegment_Append(b *testing.B) {
 	tempDir := b.TempDir()
 	cfg := log.SegmentConfig{
