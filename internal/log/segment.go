@@ -1,7 +1,7 @@
 // Package: log
 // File: segment.go
 // Core Work: Append-only log segment lifecycle, physical record writing, sparse indexing, and crash recovery
-// Exported: SegmentConfig, Segment, OpenSegment, ErrSegmentFull
+// Exported: SegmentConfig, Segment, OpenSegment, MaxSegmentBytes, ErrSegmentFull, ErrSegmentTooLarge, ErrOffsetPrecedesBase
 package log
 
 import (
@@ -18,7 +18,13 @@ var (
 	ErrSegmentFull = errors.New("segment is full: write exceeds maximum segment bytes")
 	// ErrOffsetPrecedesBase is returned when appending a record whose absolute offset is smaller than baseOffset.
 	ErrOffsetPrecedesBase = errors.New("record offset precedes segment base offset")
+	// ErrSegmentTooLarge is returned when SegmentConfig.MaxBytes exceeds MaxSegmentBytes.
+	ErrSegmentTooLarge = errors.New("walite: configured max segment bytes exceeds 4GB index boundary")
 )
+
+// MaxSegmentBytes defines the maximum physical size of a segment file (4GB - 1).
+// It prevents 32-bit integer overflow in the sparse index position field.
+const MaxSegmentBytes uint64 = 1<<32 - 1
 
 // SegmentConfig defines operational constraints for a single segment log & index pair.
 type SegmentConfig struct {
@@ -52,6 +58,10 @@ func FormatSegmentFileName(baseOffset uint64, ext string) string {
 // OpenSegment opens an existing segment or creates a new segment file pair (`.log` and `.index`)
 // at baseOffset inside cfg.Directory. It validates integrity and recovers from torn writes.
 func OpenSegment(cfg SegmentConfig) (*Segment, error) {
+	if cfg.MaxBytes > MaxSegmentBytes {
+		return nil, ErrSegmentTooLarge
+	}
+
 	if cfg.IndexIntervalBytes == 0 {
 		cfg.IndexIntervalBytes = DefaultIndexIntervalBytes
 	}
@@ -126,11 +136,15 @@ func (s *Segment) Append(rec *Record) (uint64, error) {
 		return 0, os.ErrClosed
 	}
 
+	if uint64(len(rec.Key))+uint64(len(rec.Value)) > MaxRecordPayload {
+		return 0, ErrRecordTooLarge
+	}
+
 	rec.Offset = s.nextOffset
 	encoded := EncodeRecord(nil, rec)
 
 	encodedLen := uint64(len(encoded))
-	if s.maxBytes > 0 && (s.curBytes+encodedLen) > s.maxBytes {
+	if (s.maxBytes > 0 && (s.curBytes+encodedLen) > s.maxBytes) || (s.curBytes+encodedLen > MaxSegmentBytes) {
 		return 0, ErrSegmentFull
 	}
 

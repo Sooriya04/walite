@@ -207,3 +207,42 @@ func TestSegment_TornWriteCrashRecovery(t *testing.T) {
 		t.Fatalf("expected new append offset 53, got %d", newOffset)
 	}
 }
+
+func TestSegment_MaxBytesLimit(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset: 0,
+		MaxBytes:   log.MaxSegmentBytes + 1,
+		Directory:  tempDir,
+	}
+
+	_, err := log.OpenSegment(cfg)
+	if err != log.ErrSegmentTooLarge {
+		t.Fatalf("expected ErrSegmentTooLarge for MaxBytes > 4GB, got %v", err)
+	}
+}
+
+func TestSegment_AppendPayloadLimit(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset: 0,
+		MaxBytes:   1024 * 1024,
+		Directory:  tempDir,
+	}
+
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed to open segment: %v", err)
+	}
+	defer seg.Close()
+
+	rec := &log.Record{
+		Key:   make([]byte, 1024),
+		Value: make([]byte, log.MaxRecordPayload),
+	}
+
+	_, err = seg.Append(rec)
+	if err != log.ErrRecordTooLarge {
+		t.Fatalf("expected ErrRecordTooLarge, got %v", err)
+	}
+}
