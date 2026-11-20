@@ -5,3 +5,7 @@
 /bin/
 /dist/
 data/
+
+# Internal audit reports
+audit/
+
