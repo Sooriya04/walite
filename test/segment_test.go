@@ -536,6 +536,63 @@ func TestSegment_NestedDirectoryBootstrap(t *testing.T) {
 	}
 }
 
+func TestSegment_OffsetRegressionRecovery(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset:         50,
+		MaxBytes:           1024 * 1024,
+		IndexIntervalBytes: 4096,
+		Directory:          tempDir,
+	}
+
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed to open segment: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		_, err := seg.Append(&log.Record{
+			Timestamp: 1000,
+			Key:       []byte("key"),
+			Value:     []byte("val"),
+		})
+		if err != nil {
+			t.Fatalf("failed append %d: %v", i, err)
+		}
+	}
+	if err := seg.Close(); err != nil {
+		t.Fatalf("failed close: %v", err)
+	}
+
+	// Manually inject a valid-encoded record with an invalid jumped offset (e.g., offset 99 instead of 53)
+	logPath := filepath.Join(tempDir, log.FormatSegmentFileName(50, ".log"))
+	f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatalf("failed open log: %v", err)
+	}
+	jumpedRec := log.EncodeRecord(nil, &log.Record{
+		Offset:    99, // Jumped offset!
+		Timestamp: 2000,
+		Key:       []byte("jumped"),
+		Value:     []byte("bad"),
+	})
+	if _, err := f.Write(jumpedRec); err != nil {
+		t.Fatalf("failed write jumped rec: %v", err)
+	}
+	f.Close()
+
+	// Reopen segment: should detect non-continuous offset and truncate it cleanly
+	reopened, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("reopen failed: %v", err)
+	}
+	defer reopened.Close()
+
+	if reopened.NextOffset() != 53 {
+		t.Fatalf("expected NextOffset to be 53 after truncating jumped offset, got %d", reopened.NextOffset())
+	}
+}
+
 func BenchmarkSegment_Append(b *testing.B) {
 	tempDir := b.TempDir()
 	cfg := log.SegmentConfig{

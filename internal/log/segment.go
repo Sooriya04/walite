@@ -328,6 +328,19 @@ func (s *Segment) recoverAndSync() error {
 			break
 		}
 
+		// Enforce strict monotonicity and continuity of offsets during recovery
+		if !hasRecords {
+			if rec.Offset != s.baseOffset {
+				// First record does not match baseOffset; stale/recycled disk sector
+				break
+			}
+		} else {
+			if rec.Offset != lastOffset+1 {
+				// Offset jump or regression detected; truncate from here
+				break
+			}
+		}
+
 		lastOffset = rec.Offset
 		hasRecords = true
 		validBytes += totalRecordLen
