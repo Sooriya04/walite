@@ -204,6 +204,31 @@ func TestIndex_Truncate(t *testing.T) {
 	}
 }
 
+func TestIndex_ClosedOperations(t *testing.T) {
+	tempDir := t.TempDir()
+	indexPath := filepath.Join(tempDir, "closed.index")
+
+	idx, err := log.OpenIndex(indexPath)
+	if err != nil {
+		t.Fatalf("failed to open index: %v", err)
+	}
+
+	if err := idx.Close(); err != nil {
+		t.Fatalf("failed to close index: %v", err)
+	}
+
+	// Verify operations on closed index return os.ErrClosed without panicking
+	if err := idx.WriteEntry(1, 100); err != os.ErrClosed {
+		t.Fatalf("expected os.ErrClosed on WriteEntry, got %v", err)
+	}
+	if err := idx.Truncate(0); err != os.ErrClosed {
+		t.Fatalf("expected os.ErrClosed on Truncate, got %v", err)
+	}
+	if err := idx.Sync(); err != os.ErrClosed {
+		t.Fatalf("expected os.ErrClosed on Sync, got %v", err)
+	}
+}
+
 func BenchmarkIndex_Lookup(b *testing.B) {
 	tempDir := b.TempDir()
 	indexPath := filepath.Join(tempDir, "bench.index")
