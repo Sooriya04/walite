@@ -372,3 +372,33 @@ func TestSegment_AppendPayloadLimit(t *testing.T) {
 		t.Fatalf("expected ErrRecordTooLarge, got %v", err)
 	}
 }
+
+func BenchmarkSegment_Append(b *testing.B) {
+	tempDir := b.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset:         0,
+		MaxBytes:           1024 * 1024 * 1024,
+		IndexIntervalBytes: 4096,
+		Directory:          tempDir,
+	}
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer seg.Close()
+
+	rec := &log.Record{
+		Key:   []byte("bench-key"),
+		Value: []byte("bench-value-payload-1234567890"),
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec.Timestamp = int64(i)
+		_, err := seg.Append(rec)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}

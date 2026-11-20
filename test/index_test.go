@@ -203,3 +203,27 @@ func TestIndex_Truncate(t *testing.T) {
 		t.Fatalf("expected 5 entries, got %d", count)
 	}
 }
+
+func BenchmarkIndex_Lookup(b *testing.B) {
+	tempDir := b.TempDir()
+	indexPath := filepath.Join(tempDir, "bench.index")
+	idx, err := log.OpenIndex(indexPath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer idx.Close()
+
+	// Seed 10,000 entries
+	for i := uint32(0); i < 10000; i++ {
+		if err := idx.WriteEntry(i*10, i*4096); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		target := uint32((i % 10000) * 10)
+		_, _ = idx.Lookup(target)
+	}
+}
