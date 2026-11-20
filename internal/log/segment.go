@@ -104,6 +104,18 @@ func (s *Segment) BaseOffset() uint64 {
 	return s.baseOffset
 }
 
+// NextSegmentConfig generates a SegmentConfig for the subsequent contiguous segment.
+func (s *Segment) NextSegmentConfig(maxBytes uint64, indexInterval uint32) SegmentConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return SegmentConfig{
+		BaseOffset:         s.nextOffset,
+		MaxBytes:           maxBytes,
+		IndexIntervalBytes: indexInterval,
+		Directory:          filepath.Dir(s.logFile.Name()),
+	}
+}
+
 // NextOffset returns the next absolute offset that will be assigned to a new record.
 func (s *Segment) NextOffset() uint64 {
 	s.mu.RLock()
@@ -136,6 +148,10 @@ func (s *Segment) Append(rec *Record) (uint64, error) {
 
 	if s.closed {
 		return 0, os.ErrClosed
+	}
+
+	if rec.Offset != 0 && rec.Offset < s.baseOffset {
+		return 0, ErrOffsetPrecedesBase
 	}
 
 	if uint64(len(rec.Key))+uint64(len(rec.Value)) > MaxRecordPayload {
