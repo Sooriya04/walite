@@ -6,9 +6,12 @@ package test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -371,6 +374,69 @@ func TestSegment_AppendPayloadLimit(t *testing.T) {
 	if err != log.ErrRecordTooLarge {
 		t.Fatalf("expected ErrRecordTooLarge, got %v", err)
 	}
+}
+
+func TestSegment_ConcurrentAppendAndTailRead(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset:         0,
+		MaxBytes:           10 * 1024 * 1024,
+		IndexIntervalBytes: 128,
+		Directory:          tempDir,
+	}
+
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed to open segment: %v", err)
+	}
+	defer seg.Close()
+
+	const numRecords = 500
+	const numReaders = 4
+
+	var wg sync.WaitGroup
+	var stopReaders int32
+
+	// Start concurrent readers tailing the segment
+	for r := 0; r < numReaders; r++ {
+		wg.Add(1)
+		go func(readerID int) {
+			defer wg.Done()
+			var currentOffset uint64 = 0
+			for atomic.LoadInt32(&stopReaders) == 0 || currentOffset < numRecords {
+				rec, err := seg.ReadAt(currentOffset)
+				if err == io.EOF {
+					time.Sleep(1 * time.Millisecond)
+					continue
+				}
+				if err != nil {
+					t.Errorf("reader %d failed reading offset %d: %v", readerID, currentOffset, err)
+					return
+				}
+				if rec.Offset != currentOffset {
+					t.Errorf("reader %d offset mismatch: got %d, want %d", readerID, rec.Offset, currentOffset)
+					return
+				}
+				currentOffset++
+			}
+		}(r)
+	}
+
+	// Producer appends records concurrently
+	for i := 0; i < numRecords; i++ {
+		rec := &log.Record{
+			Timestamp: time.Now().UnixNano(),
+			Key:       []byte(fmt.Sprintf("key-%d", i)),
+			Value:     []byte(fmt.Sprintf("concurrent-payload-value-%d", i)),
+		}
+		_, err := seg.Append(rec)
+		if err != nil {
+			t.Fatalf("failed appending record %d: %v", i, err)
+		}
+	}
+
+	atomic.StoreInt32(&stopReaders, 1)
+	wg.Wait()
 }
 
 func BenchmarkSegment_Append(b *testing.B) {
