@@ -169,20 +169,20 @@ func (s *Segment) Append(rec *Record) (uint64, error) {
 	pos := uint32(s.curBytes)
 	relOffset := uint32(rec.Offset - s.baseOffset)
 
-	// Sparse indexing: write index entry if interval reached or on the first entry
-	if s.bytesSinceIdx >= s.indexInterval || s.curBytes == 0 {
-		if err := s.index.WriteEntry(relOffset, pos); err != nil {
-			return 0, fmt.Errorf("failed to write index entry: %w", err)
-		}
-		s.bytesSinceIdx = 0
-	}
-
 	n, err := s.logFile.Write(s.appendBuf)
 	if err != nil {
 		return 0, fmt.Errorf("failed to write record to log: %w", err)
 	}
 	if n != len(s.appendBuf) {
 		return 0, io.ErrShortWrite
+	}
+
+	// Sparse indexing: write index entry only after log write succeeds
+	if s.bytesSinceIdx >= s.indexInterval || s.curBytes == 0 {
+		if err := s.index.WriteEntry(relOffset, pos); err != nil {
+			return 0, fmt.Errorf("failed to write index entry: %w", err)
+		}
+		s.bytesSinceIdx = 0
 	}
 
 	assignedOffset := s.nextOffset
