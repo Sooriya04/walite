@@ -408,7 +408,35 @@ func (s *Segment) recoverAndSync() error {
 	} else if validIdxCount > 0 {
 		lastEntry, err := s.index.ReadAt(validIdxCount - 1)
 		if err == nil {
-			s.bytesSinceIdx = uint32(s.curBytes - uint64(lastEntry.Position))
+			unindexedBytes := uint32(s.curBytes - uint64(lastEntry.Position))
+			if unindexedBytes >= s.indexInterval {
+				// Index lagged behind log during crash; scan from lastEntry.Position to backfill missing entries
+				scanBytes := int64(lastEntry.Position)
+				bytesSince := uint32(0)
+				for scanBytes < validBytes {
+					pos := uint32(scanBytes)
+					n, err := s.logFile.ReadAt(headerBuf, scanBytes)
+					if err != nil || n < HeaderSize {
+						return fmt.Errorf("failed reading header during lagged index rebuild at %d: %w", scanBytes, err)
+					}
+					keyLen, valLen, _ := ParseHeaderLengths(headerBuf)
+					recordOffset := binary.BigEndian.Uint64(headerBuf[0:8])
+					totalRecordLen := int64(HeaderSize + keyLen + valLen)
+
+					if pos > lastEntry.Position && bytesSince >= s.indexInterval {
+						relOffset := uint32(recordOffset - s.baseOffset)
+						if err := s.index.WriteEntry(relOffset, pos); err != nil {
+							return fmt.Errorf("failed to write lagged index entry: %w", err)
+						}
+						bytesSince = 0
+					}
+					bytesSince += uint32(totalRecordLen)
+					scanBytes += totalRecordLen
+				}
+				s.bytesSinceIdx = bytesSince
+			} else {
+				s.bytesSinceIdx = unindexedBytes
+			}
 		}
 	} else {
 		s.bytesSinceIdx = 0
@@ -452,4 +480,11 @@ func (s *Segment) Close() error {
 
 	s.closed = true
 	return firstErr
+}
+
+// IndexEntriesCount returns the number of sparse index entries in the segment.
+func (s *Segment) IndexEntriesCount() uint32 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.index.EntriesCount()
 }
