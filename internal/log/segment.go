@@ -162,19 +162,24 @@ func (s *Segment) Append(rec *Record) (uint64, error) {
 }
 
 // ReadAt reads a single record starting at the specified absolute offset.
-// It leverages the sparse index to seek to the closest predecessor position, then scans sequentially.
+// It snapshots the committed high-watermark boundaries, consults the sparse index,
+// and streams record data using thread-safe pread syscalls without blocking concurrent appends.
 func (s *Segment) ReadAt(targetOffset uint64) (*Record, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	if s.closed {
+		s.mu.RUnlock()
 		return nil, os.ErrClosed
 	}
-	if targetOffset < s.baseOffset || targetOffset >= s.nextOffset {
+	baseOffset := s.baseOffset
+	nextOffset := s.nextOffset
+	maxBytes := s.curBytes
+	s.mu.RUnlock()
+
+	if targetOffset < baseOffset || targetOffset >= nextOffset {
 		return nil, io.EOF
 	}
 
-	relOffset := uint32(targetOffset - s.baseOffset)
+	relOffset := uint32(targetOffset - baseOffset)
 	startPos := uint32(0)
 
 	// Consult sparse index for nearest indexed byte position
@@ -185,7 +190,7 @@ func (s *Segment) ReadAt(targetOffset uint64) (*Record, error) {
 	curPos := int64(startPos)
 	headerBuf := make([]byte, HeaderSize)
 
-	for curPos < int64(s.curBytes) {
+	for curPos < int64(maxBytes) {
 		n, err := s.logFile.ReadAt(headerBuf, curPos)
 		if err != nil && err != io.EOF {
 			return nil, fmt.Errorf("failed to read record header at pos %d: %w", curPos, err)
@@ -200,6 +205,10 @@ func (s *Segment) ReadAt(targetOffset uint64) (*Record, error) {
 		}
 
 		totalRecordLen := int64(HeaderSize + keyLen + valLen)
+		if curPos+totalRecordLen > int64(maxBytes) {
+			return nil, io.EOF
+		}
+
 		fullBuf := make([]byte, totalRecordLen)
 		n, err = s.logFile.ReadAt(fullBuf, curPos)
 		if err != nil && err != io.EOF {
