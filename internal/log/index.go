@@ -105,6 +105,10 @@ func (idx *Index) WriteEntry(relativeOffset, position uint32) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
+	if idx.file == nil {
+		return os.ErrClosed
+	}
+
 	var buf [EntrySize]byte
 	binary.BigEndian.PutUint32(buf[0:4], relativeOffset)
 	binary.BigEndian.PutUint32(buf[4:8], position)
@@ -168,6 +172,10 @@ func (idx *Index) Truncate(count uint32) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
+	if idx.file == nil {
+		return os.ErrClosed
+	}
+
 	newBytes := int64(count) * EntrySize
 	if err := idx.file.Truncate(newBytes); err != nil {
 		return fmt.Errorf("failed to truncate index file: %w", err)
@@ -187,6 +195,11 @@ func (idx *Index) Truncate(count uint32) error {
 func (idx *Index) Sync() error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
+
+	if idx.file == nil {
+		return os.ErrClosed
+	}
+
 	return idx.file.Sync()
 }
 
