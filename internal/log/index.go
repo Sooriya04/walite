@@ -59,9 +59,13 @@ func OpenIndex(path string) (*Index, error) {
 	}
 
 	fileSize := stat.Size()
-	if fileSize%EntrySize != 0 {
-		_ = file.Close()
-		return nil, ErrIndexCorrupt
+	if remainder := fileSize % EntrySize; remainder != 0 {
+		alignedSize := fileSize - remainder
+		if err := file.Truncate(alignedSize); err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("failed to truncate torn index entry: %w", err)
+		}
+		fileSize = alignedSize
 	}
 
 	return &Index{

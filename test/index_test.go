@@ -152,10 +152,14 @@ func TestIndex_RecoveryAndCorruptCheck(t *testing.T) {
 	}
 	_ = f.Close()
 
-	// 4. Opening corrupt index must return ErrIndexCorrupt
-	_, err = log.OpenIndex(indexPath)
-	if err != log.ErrIndexCorrupt {
-		t.Fatalf("expected ErrIndexCorrupt, got %v", err)
+	// 4. Opening index with torn trailing write must auto-truncate to 8-byte boundary and retain valid entries
+	idx3, err := log.OpenIndex(indexPath)
+	if err != nil {
+		t.Fatalf("expected successful recovery of torn index, got err: %v", err)
+	}
+	defer idx3.Close()
+	if count := idx3.EntriesCount(); count != 2 {
+		t.Fatalf("expected 2 valid entries after torn index recovery, got %d", count)
 	}
 }
 

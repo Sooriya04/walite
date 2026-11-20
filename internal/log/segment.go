@@ -5,6 +5,7 @@
 package log
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -298,7 +299,7 @@ func (s *Segment) recoverAndSync() error {
 		s.nextOffset = s.baseOffset
 	}
 
-	// Rebuild index count if index entries reference positions beyond validBytes
+	// Rebuild or align index entries with validBytes
 	idxCount := s.index.EntriesCount()
 	validIdxCount := uint32(0)
 	for i := uint32(0); i < idxCount; i++ {
@@ -316,6 +317,40 @@ func (s *Segment) recoverAndSync() error {
 		if err := s.index.Truncate(validIdxCount); err != nil {
 			return fmt.Errorf("failed to align index with truncated log: %w", err)
 		}
+	}
+
+	if validIdxCount == 0 && hasRecords {
+		// Index is empty or was wiped; rebuild index entries from valid log records
+		var scanBytes int64
+		var bytesSince uint32
+		for scanBytes < validBytes {
+			pos := uint32(scanBytes)
+			n, err := s.logFile.ReadAt(headerBuf, scanBytes)
+			if err != nil || n < HeaderSize {
+				return fmt.Errorf("failed reading header during index rebuild at %d: %w", scanBytes, err)
+			}
+			keyLen, valLen, _ := ParseHeaderLengths(headerBuf)
+			recordOffset := binary.BigEndian.Uint64(headerBuf[0:8])
+			totalRecordLen := int64(HeaderSize + keyLen + valLen)
+
+			if bytesSince >= s.indexInterval || scanBytes == 0 {
+				relOffset := uint32(recordOffset - s.baseOffset)
+				if err := s.index.WriteEntry(relOffset, pos); err != nil {
+					return fmt.Errorf("failed to write rebuilt index entry: %w", err)
+				}
+				bytesSince = 0
+			}
+			bytesSince += uint32(totalRecordLen)
+			scanBytes += totalRecordLen
+		}
+		s.bytesSinceIdx = bytesSince
+	} else if validIdxCount > 0 {
+		lastEntry, err := s.index.ReadAt(validIdxCount - 1)
+		if err == nil {
+			s.bytesSinceIdx = uint32(s.curBytes - uint64(lastEntry.Position))
+		}
+	} else {
+		s.bytesSinceIdx = 0
 	}
 
 	return nil

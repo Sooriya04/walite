@@ -207,3 +207,129 @@ func TestSegment_TornWriteCrashRecovery(t *testing.T) {
 		t.Fatalf("expected new append offset 53, got %d", newOffset)
 	}
 }
+
+func TestSegment_IndexTornWriteCrashRecovery(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset:         0,
+		MaxBytes:           1024 * 1024,
+		IndexIntervalBytes: 64,
+		Directory:          tempDir,
+	}
+
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed to open segment: %v", err)
+	}
+
+	// Write 5 records
+	for i := 0; i < 5; i++ {
+		_, err := seg.Append(&log.Record{
+			Timestamp: 1000,
+			Key:       []byte("key"),
+			Value:     []byte("payload-data-value-1234567890"),
+		})
+		if err != nil {
+			t.Fatalf("append %d failed: %v", i, err)
+		}
+	}
+	if err := seg.Close(); err != nil {
+		t.Fatalf("failed closing segment: %v", err)
+	}
+
+	// Simulate torn write on index file: append 5 unaligned bytes
+	indexPath := filepath.Join(tempDir, log.FormatSegmentFileName(0, ".index"))
+	f, err := os.OpenFile(indexPath, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatalf("failed to open index for corrupt append: %v", err)
+	}
+	if _, err := f.Write([]byte{1, 2, 3, 4, 5}); err != nil {
+		t.Fatalf("failed appending torn index bytes: %v", err)
+	}
+	_ = f.Close()
+
+	// Reopen segment: must auto-truncate torn index entry and successfully boot
+	reopenedSeg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed to reopen segment after index torn write: %v", err)
+	}
+	defer reopenedSeg.Close()
+
+	// Verify all 5 records can still be read
+	for i := 0; i < 5; i++ {
+		rec, err := reopenedSeg.ReadAt(uint64(i))
+		if err != nil {
+			t.Fatalf("failed to read record %d: %v", i, err)
+		}
+		if rec.Offset != uint64(i) {
+			t.Fatalf("record offset mismatch: got %d, want %d", rec.Offset, i)
+		}
+	}
+
+	// Append a new record
+	next, err := reopenedSeg.Append(&log.Record{
+		Timestamp: 2000,
+		Key:       []byte("new-key"),
+		Value:     []byte("new-val"),
+	})
+	if err != nil {
+		t.Fatalf("failed to append to recovered segment: %v", err)
+	}
+	if next != 5 {
+		t.Fatalf("expected next offset 5, got %d", next)
+	}
+}
+
+func TestSegment_IndexRebuildOnMissingIndex(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset:         200,
+		MaxBytes:           1024 * 1024,
+		IndexIntervalBytes: 64,
+		Directory:          tempDir,
+	}
+
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed to open segment: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		_, err := seg.Append(&log.Record{
+			Timestamp: 1000,
+			Key:       []byte("k"),
+			Value:     []byte("payload-bytes-longer-than-interval"),
+		})
+		if err != nil {
+			t.Fatalf("append %d failed: %v", i, err)
+		}
+	}
+	if err := seg.Close(); err != nil {
+		t.Fatalf("failed closing segment: %v", err)
+	}
+
+	// Completely delete the index file
+	indexPath := filepath.Join(tempDir, log.FormatSegmentFileName(200, ".index"))
+	if err := os.Remove(indexPath); err != nil {
+		t.Fatalf("failed to remove index file: %v", err)
+	}
+
+	// Reopen segment: recovery must rebuild the sparse index from the log file
+	reopenedSeg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed to reopen segment with missing index: %v", err)
+	}
+	defer reopenedSeg.Close()
+
+	// Verify all 10 records can be read
+	for i := 0; i < 10; i++ {
+		target := uint64(200 + i)
+		rec, err := reopenedSeg.ReadAt(target)
+		if err != nil {
+			t.Fatalf("failed to read record %d: %v", target, err)
+		}
+		if rec.Offset != target {
+			t.Fatalf("offset mismatch: got %d, want %d", rec.Offset, target)
+		}
+	}
+}
