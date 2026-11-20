@@ -211,7 +211,10 @@ func (s *Segment) ReadAt(targetOffset uint64) (*Record, error) {
 	maxBytes := s.curBytes
 	s.mu.RUnlock()
 
-	if targetOffset < baseOffset || targetOffset >= nextOffset {
+	if targetOffset < baseOffset {
+		return nil, ErrOffsetPrecedesBase
+	}
+	if targetOffset >= nextOffset {
 		return nil, io.EOF
 	}
 
