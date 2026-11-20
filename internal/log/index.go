@@ -109,6 +109,10 @@ func (idx *Index) WriteEntry(relativeOffset, position uint32) error {
 		return os.ErrClosed
 	}
 
+	if len(idx.entries) > 0 && relativeOffset < idx.entries[len(idx.entries)-1].RelativeOffset {
+		return errors.New("walite: non-monotonic index relative offset")
+	}
+
 	var buf [EntrySize]byte
 	binary.BigEndian.PutUint32(buf[0:4], relativeOffset)
 	binary.BigEndian.PutUint32(buf[4:8], position)
@@ -133,6 +137,10 @@ func (idx *Index) ReadAt(entryIdx uint32) (IndexEntry, error) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
+	if idx.file == nil {
+		return IndexEntry{}, os.ErrClosed
+	}
+
 	if int(entryIdx) >= len(idx.entries) {
 		return IndexEntry{}, io.EOF
 	}
@@ -144,6 +152,10 @@ func (idx *Index) ReadAt(entryIdx uint32) (IndexEntry, error) {
 func (idx *Index) Lookup(targetRelOffset uint32) (IndexEntry, error) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
+
+	if idx.file == nil {
+		return IndexEntry{}, os.ErrClosed
+	}
 
 	n := len(idx.entries)
 	if n == 0 || targetRelOffset < idx.entries[0].RelativeOffset {

@@ -690,6 +690,63 @@ func TestSegment_RelativeOffsetOverflowGuard(t *testing.T) {
 	}
 }
 
+func TestSegment_ReadAtFastSkip(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset:         500,
+		MaxBytes:           1024 * 1024,
+		IndexIntervalBytes: 1024, // Sparse index interval > record size to ensure multiple records between index entries
+		Directory:          tempDir,
+	}
+
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed to open segment: %v", err)
+	}
+	defer seg.Close()
+
+	// Append 30 records of varied payload sizes
+	records := make([]*log.Record, 30)
+	for i := 0; i < 30; i++ {
+		records[i] = &log.Record{
+			Timestamp: int64(1000 + i),
+			Key:       []byte(fmt.Sprintf("key-%03d", i)),
+			Value:     bytes.Repeat([]byte{byte(i + 1)}, (i+1)*16),
+		}
+		offset, err := seg.Append(records[i])
+		if err != nil {
+			t.Fatalf("append %d failed: %v", i, err)
+		}
+		if offset != uint64(500+i) {
+			t.Fatalf("expected offset %d, got %d", 500+i, offset)
+		}
+	}
+
+	// Read selective offsets: first, intermediate (skipping several), last
+	targets := []uint64{500, 501, 507, 515, 529}
+	for _, target := range targets {
+		rec, err := seg.ReadAt(target)
+		if err != nil {
+			t.Fatalf("ReadAt(%d) failed: %v", target, err)
+		}
+		idx := int(target - 500)
+		if rec.Offset != target {
+			t.Fatalf("expected offset %d, got %d", target, rec.Offset)
+		}
+		if !bytes.Equal(rec.Key, records[idx].Key) {
+			t.Fatalf("key mismatch for %d", target)
+		}
+		if !bytes.Equal(rec.Value, records[idx].Value) {
+			t.Fatalf("value mismatch for %d", target)
+		}
+	}
+
+	// Non-existent offset past end returns EOF
+	if _, err := seg.ReadAt(530); err != io.EOF {
+		t.Fatalf("expected EOF for offset 530, got %v", err)
+	}
+}
+
 func BenchmarkSegment_Append(b *testing.B) {
 	tempDir := b.TempDir()
 	cfg := log.SegmentConfig{
