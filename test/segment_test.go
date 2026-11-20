@@ -80,8 +80,8 @@ func TestSegment_AppendAndReadAt(t *testing.T) {
 	}
 
 	// Out of bounds read check
-	if _, err := seg.ReadAt(99); err != io.EOF {
-		t.Fatalf("expected EOF reading before baseOffset, got %v", err)
+	if _, err := seg.ReadAt(99); err != log.ErrOffsetPrecedesBase {
+		t.Fatalf("expected ErrOffsetPrecedesBase reading before baseOffset, got %v", err)
 	}
 	if _, err := seg.ReadAt(110); err != io.EOF {
 		t.Fatalf("expected EOF reading at nextOffset, got %v", err)
@@ -401,7 +401,19 @@ func TestSegment_OffsetPrecedesBase(t *testing.T) {
 
 	_, err = seg.Append(rec)
 	if err != log.ErrOffsetPrecedesBase {
-		t.Fatalf("expected ErrOffsetPrecedesBase, got %v", err)
+		t.Fatalf("expected ErrOffsetPrecedesBase on Append, got %v", err)
+	}
+
+	// Reading an offset preceding baseOffset must return ErrOffsetPrecedesBase instead of io.EOF
+	_, err = seg.ReadAt(499)
+	if err != log.ErrOffsetPrecedesBase {
+		t.Fatalf("expected ErrOffsetPrecedesBase on ReadAt, got %v", err)
+	}
+
+	// Reading an offset beyond nextOffset must still return io.EOF
+	_, err = seg.ReadAt(500)
+	if err != io.EOF {
+		t.Fatalf("expected io.EOF on ReadAt beyond nextOffset, got %v", err)
 	}
 }
 
