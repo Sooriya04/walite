@@ -1,7 +1,7 @@
 // Package: log
 // File: record.go
-// Core Work: Defines the in-memory Record representation and zero-allocation binary wire serialization.
-// Exported: Record, HeaderSize, EncodeRecord, DecodeRecord, ErrCorruptRecord, ErrTruncatedRecord
+// Core Work: Defines the in-memory Record representation, zero-allocation binary wire serialization, and header inspection.
+// Exported: Record, HeaderSize, EncodeRecord, DecodeRecord, ParseHeaderLengths, ErrCorruptRecord, ErrTruncatedRecord
 
 package log
 
@@ -22,6 +22,16 @@ var (
 // HeaderSize is the fixed byte overhead of a record on disk:
 // Offset (8B) + Timestamp (8B) + CRC32 (4B) + KeyLen (4B) + ValLen (4B) = 28 Bytes.
 const HeaderSize = 28
+
+// ParseHeaderLengths extracts keyLen and valLen from a 28-byte header slice without decoding the full record.
+func ParseHeaderLengths(header []byte) (int, int, error) {
+	if len(header) < HeaderSize {
+		return 0, 0, ErrTruncatedRecord
+	}
+	keyLen := int(binary.BigEndian.Uint32(header[20:24]))
+	valLen := int(binary.BigEndian.Uint32(header[24:28]))
+	return keyLen, valLen, nil
+}
 
 // Record represents a single append-only commit unit in a partition.
 type Record struct {
