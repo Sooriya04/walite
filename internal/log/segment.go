@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -156,6 +157,10 @@ func (s *Segment) Append(rec *Record) (uint64, error) {
 
 	if rec.Offset != 0 && rec.Offset < s.baseOffset {
 		return 0, ErrOffsetPrecedesBase
+	}
+
+	if s.nextOffset-s.baseOffset > math.MaxUint32 {
+		return 0, ErrSegmentFull
 	}
 
 	if uint64(len(rec.Key))+uint64(len(rec.Value)) > MaxRecordPayload {

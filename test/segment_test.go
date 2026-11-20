@@ -664,6 +664,32 @@ func TestSegment_LaggedIndexBackfillRecovery(t *testing.T) {
 	}
 }
 
+func TestSegment_RelativeOffsetOverflowGuard(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset:         0,
+		MaxBytes:           1024 * 1024,
+		IndexIntervalBytes: 4096,
+		Directory:          tempDir,
+	}
+
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed open segment: %v", err)
+	}
+	defer seg.Close()
+
+	// Append a valid record first
+	_, err = seg.Append(&log.Record{
+		Timestamp: 1000,
+		Key:       []byte("k"),
+		Value:     []byte("v"),
+	})
+	if err != nil {
+		t.Fatalf("failed initial append: %v", err)
+	}
+}
+
 func BenchmarkSegment_Append(b *testing.B) {
 	tempDir := b.TempDir()
 	cfg := log.SegmentConfig{
