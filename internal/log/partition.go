@@ -1,7 +1,7 @@
 // Package: log
 // File: partition.go
 // Core Work: Multi-segment partition management, active segment rollover, and partition-wide offset reads
-// Exported: PartitionConfig, Partition, OpenPartition, ErrOffsetOutOfRange
+// Exported: PartitionConfig, Partition, OpenPartition, ErrOffsetOutOfRange, ErrRecordExceedsSegmentSize
 package log
 
 import (
@@ -19,6 +19,9 @@ import (
 var (
 	// ErrOffsetOutOfRange is returned when a read request targets an offset outside the partition's bounds.
 	ErrOffsetOutOfRange = errors.New("walite: requested offset is out of range")
+
+	// ErrRecordExceedsSegmentSize is returned when a record's encoded size exceeds MaxSegmentBytes.
+	ErrRecordExceedsSegmentSize = errors.New("walite: record size exceeds maximum segment capacity")
 )
 
 // PartitionConfig specifies directory paths, rollover thresholds, durability flush policies, and retention policies.
@@ -144,8 +147,16 @@ func (p *Partition) Append(rec *Record) (uint64, error) {
 		return 0, os.ErrClosed
 	}
 
+	encodedLen := uint64(HeaderSize + len(rec.Key) + len(rec.Value))
+	if encodedLen > p.cfg.MaxSegmentBytes {
+		return 0, ErrRecordExceedsSegmentSize
+	}
+
 	offset, err := p.active.Append(rec)
 	if errors.Is(err, ErrSegmentFull) {
+		if p.active.CurrentSize() == 0 {
+			return 0, ErrSegmentFull
+		}
 		if err := p.rotateActiveSegmentLocked(); err != nil {
 			return 0, fmt.Errorf("failed to rotate segment: %w", err)
 		}
@@ -157,8 +168,7 @@ func (p *Partition) Append(rec *Record) (uint64, error) {
 	}
 
 	if p.flusher != nil {
-		recordBytes := uint64(HeaderSize + len(rec.Key) + len(rec.Value))
-		if p.flusher.OnAppend(recordBytes) {
+		if p.flusher.OnAppend(encodedLen) {
 			if err := p.active.Sync(); err != nil {
 				return 0, fmt.Errorf("failed to sync active segment: %w", err)
 			}
@@ -170,6 +180,10 @@ func (p *Partition) Append(rec *Record) (uint64, error) {
 }
 
 func (p *Partition) rotateActiveSegmentLocked() error {
+	if p.active.CurrentSize() == 0 {
+		return errors.New("walite: cannot rotate empty active segment")
+	}
+
 	if err := p.active.Sync(); err != nil {
 		return fmt.Errorf("failed to sync active segment before rollover: %w", err)
 	}
@@ -355,7 +369,8 @@ func (p *Partition) CleanSegments() (int, error) {
 		cutoff := time.Now().Add(-p.cfg.Cleaner.MaxRetentionAge)
 		for len(p.segments) > 1 {
 			oldest := p.segments[0]
-			if oldest.ModTime().Before(cutoff) {
+			modTime := oldest.ModTime()
+			if !modTime.IsZero() && modTime.Before(cutoff) {
 				if err := oldest.Remove(); err != nil {
 					return deletedCount, fmt.Errorf("failed to remove aged segment at base %d: %w", oldest.BaseOffset(), err)
 				}
