@@ -60,6 +60,7 @@ type OffsetManagerConfig struct {
 	Directory       string
 	SyncOnCommit    bool
 	MaxSegmentBytes uint64
+	Cleaner         log.CleanerConfig
 }
 
 // OffsetManager provides crash-safe, fast in-memory queryable consumer offset tracking.
@@ -88,6 +89,7 @@ func OpenOffsetManager(cfg OffsetManagerConfig) (*OffsetManager, error) {
 		Directory:          offsetsDir,
 		MaxSegmentBytes:    cfg.MaxSegmentBytes,
 		IndexIntervalBytes: 1024,
+		Cleaner:            cfg.Cleaner,
 	}
 
 	if cfg.SyncOnCommit {
@@ -116,11 +118,17 @@ func OpenOffsetManager(cfg OffsetManagerConfig) (*OffsetManager, error) {
 
 func (om *OffsetManager) replayLog() error {
 	nextOffset := om.partition.NextOffset()
-	for off := uint64(0); off < nextOffset; off++ {
+	for off := om.partition.OldestOffset(); off < nextOffset; off++ {
 		rec, err := om.partition.ReadAt(off)
 		if err != nil {
 			if errors.Is(err, log.ErrOffsetOutOfRange) {
-				// Reached end of partition or pruned segments
+				// If an offset was pruned between segments, advance to current oldest offset
+				curOldest := om.partition.OldestOffset()
+				if off < curOldest {
+					off = curOldest - 1
+					continue
+				}
+				// Reached end of partition
 				break
 			}
 			return fmt.Errorf("failed to read checkpoint at log offset %d: %w", off, err)
@@ -158,6 +166,10 @@ func (om *OffsetManager) CommitOffset(cp Checkpoint) error {
 		return os.ErrClosed
 	}
 
+	if len(cp.GroupID) > 65535 || len(cp.Topic) > 65535 || len(cp.Metadata) > 65535 {
+		return ErrInvalidCheckpoint
+	}
+
 	if cp.Timestamp == 0 {
 		cp.Timestamp = time.Now().UnixNano()
 	}
@@ -189,6 +201,10 @@ func (om *OffsetManager) CommitOffsets(checkpoints []Checkpoint) error {
 
 	now := time.Now().UnixNano()
 	for _, cp := range checkpoints {
+		if len(cp.GroupID) > 65535 || len(cp.Topic) > 65535 || len(cp.Metadata) > 65535 {
+			return ErrInvalidCheckpoint
+		}
+
 		if cp.Timestamp == 0 {
 			cp.Timestamp = now
 		}
@@ -263,6 +279,10 @@ func (om *OffsetManager) GetGroupOffsets(groupID string) map[string]map[uint32]u
 	om.mu.RLock()
 	defer om.mu.RUnlock()
 
+	if om.closed {
+		return nil
+	}
+
 	result := make(map[string]map[uint32]uint64)
 	for key, cp := range om.cache {
 		if key.GroupID == groupID {
@@ -281,6 +301,10 @@ func (om *OffsetManager) ListGroups() []string {
 	om.mu.RLock()
 	defer om.mu.RUnlock()
 
+	if om.closed {
+		return nil
+	}
+
 	groupMap := make(map[string]struct{})
 	for key := range om.cache {
 		groupMap[key.GroupID] = struct{}{}
@@ -291,6 +315,28 @@ func (om *OffsetManager) ListGroups() []string {
 		groups = append(groups, g)
 	}
 	return groups
+}
+
+// CleanSegments applies configured retention policies to purge eligible historical offset segments.
+func (om *OffsetManager) CleanSegments() (int, error) {
+	om.mu.Lock()
+	defer om.mu.Unlock()
+
+	if om.closed {
+		return 0, os.ErrClosed
+	}
+	return om.partition.CleanSegments()
+}
+
+// TruncateBefore permanently removes sealed historical offset segments before targetOffset.
+func (om *OffsetManager) TruncateBefore(targetOffset uint64) (int, error) {
+	om.mu.Lock()
+	defer om.mu.Unlock()
+
+	if om.closed {
+		return 0, os.ErrClosed
+	}
+	return om.partition.TruncateBefore(targetOffset)
 }
 
 // Sync flushes all pending checkpoint writes to physical storage.
