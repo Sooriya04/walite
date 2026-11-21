@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/barbaravane/walite/internal/log"
 )
@@ -240,4 +241,56 @@ func TestPartition_ClosedOperations(t *testing.T) {
 	if err := p.Sync(); !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("expected os.ErrClosed on Sync, got %v", err)
 	}
+}
+
+func TestPartition_ConcurrentReadDuringTruncation(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.PartitionConfig{
+		Directory:          tempDir,
+		MaxSegmentBytes:    128,
+		IndexIntervalBytes: 32,
+	}
+
+	p, err := log.OpenPartition(cfg)
+	if err != nil {
+		t.Fatalf("failed open partition: %v", err)
+	}
+	defer p.Close()
+
+	// Append 30 records to generate ~10 segments
+	for i := 0; i < 30; i++ {
+		_, err := p.Append(&log.Record{Value: []byte(fmt.Sprintf("rec-%04d", i))})
+		if err != nil {
+			t.Fatalf("append %d failed: %v", i, err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	var stopFlag int32
+
+	// Readers continuously reading early offsets that will be truncated
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for atomic.LoadInt32(&stopFlag) == 0 {
+				for offset := uint64(0); offset < 15; offset++ {
+					_, err := p.ReadAt(offset)
+					if err != nil && !errors.Is(err, log.ErrOffsetOutOfRange) {
+						t.Errorf("expected nil or ErrOffsetOutOfRange, got unexpected err: %v", err)
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// Concurrently truncate early segments
+	for target := uint64(3); target <= 15; target += 3 {
+		time.Sleep(5 * time.Millisecond)
+		_, _ = p.TruncateBefore(target)
+	}
+
+	atomic.StoreInt32(&stopFlag, 1)
+	wg.Wait()
 }

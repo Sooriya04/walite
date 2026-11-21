@@ -208,6 +208,12 @@ func (p *Partition) ReadAt(targetOffset uint64) (*Record, error) {
 		if errors.Is(err, ErrOffsetPrecedesBase) || errors.Is(err, io.EOF) {
 			return nil, ErrOffsetOutOfRange
 		}
+		p.mu.RLock()
+		closed := p.closed
+		p.mu.RUnlock()
+		if !closed && errors.Is(err, os.ErrClosed) {
+			return nil, ErrOffsetOutOfRange
+		}
 		return nil, err
 	}
 	return rec, nil
@@ -328,6 +334,7 @@ func (p *Partition) TruncateBefore(targetOffset uint64) (int, error) {
 			if err := oldest.Remove(); err != nil {
 				return deletedCount, fmt.Errorf("failed to remove segment at base %d: %w", oldest.BaseOffset(), err)
 			}
+			p.segments[0] = nil
 			p.segments = p.segments[1:]
 			deletedCount++
 		} else {
@@ -359,6 +366,7 @@ func (p *Partition) CleanSegments() (int, error) {
 				if err := oldest.Remove(); err != nil {
 					return deletedCount, fmt.Errorf("failed to remove aged segment at base %d: %w", oldest.BaseOffset(), err)
 				}
+				p.segments[0] = nil
 				p.segments = p.segments[1:]
 				deletedCount++
 			} else {
@@ -380,6 +388,7 @@ func (p *Partition) CleanSegments() (int, error) {
 			if err := oldest.Remove(); err != nil {
 				return deletedCount, fmt.Errorf("failed to remove oversized segment at base %d: %w", oldest.BaseOffset(), err)
 			}
+			p.segments[0] = nil
 			p.segments = p.segments[1:]
 			totalBytes -= segSize
 			deletedCount++
