@@ -141,38 +141,51 @@ func (p *Partition) bootstrapSegments() error {
 // it rotates to a new segment automatically and appends the record.
 func (p *Partition) Append(rec *Record) (uint64, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	if p.closed {
+		p.mu.Unlock()
 		return 0, os.ErrClosed
 	}
 
 	encodedLen := uint64(HeaderSize + len(rec.Key) + len(rec.Value))
 	if encodedLen > p.cfg.MaxSegmentBytes {
+		p.mu.Unlock()
 		return 0, ErrRecordExceedsSegmentSize
 	}
 
 	offset, err := p.active.Append(rec)
 	if errors.Is(err, ErrSegmentFull) {
 		if p.active.CurrentSize() == 0 {
+			p.mu.Unlock()
 			return 0, ErrSegmentFull
 		}
 		if err := p.rotateActiveSegmentLocked(); err != nil {
+			p.mu.Unlock()
 			return 0, fmt.Errorf("failed to rotate segment: %w", err)
 		}
 		// Retry append on new active segment
 		offset, err = p.active.Append(rec)
 	}
 	if err != nil {
+		p.mu.Unlock()
 		return 0, err
 	}
 
+	var activeToSync *Segment
 	if p.flusher != nil {
 		if p.flusher.OnAppend(encodedLen) {
-			if err := p.active.Sync(); err != nil {
-				return 0, fmt.Errorf("failed to sync active segment: %w", err)
-			}
+			activeToSync = p.active
 			p.flusher.ResetUnflushed()
+		}
+	}
+
+	p.mu.Unlock()
+
+	// Execute disk fsync outside of partition-wide mutex lock so readers across
+	// all historical segments and active segment tail are not blocked during slow disk I/O.
+	if activeToSync != nil {
+		if err := activeToSync.Sync(); err != nil {
+			return 0, fmt.Errorf("failed to sync active segment: %w", err)
 		}
 	}
 
@@ -289,18 +302,22 @@ func (p *Partition) Flusher() *Flusher {
 // Sync flushes data in all segments to disk and resets unflushed counts.
 func (p *Partition) Sync() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.closed {
+		p.mu.Unlock()
 		return os.ErrClosed
 	}
 
-	for _, seg := range p.segments {
+	segs := make([]*Segment, len(p.segments))
+	copy(segs, p.segments)
+	if p.flusher != nil {
+		p.flusher.ResetUnflushed()
+	}
+	p.mu.Unlock()
+
+	for _, seg := range segs {
 		if err := seg.Sync(); err != nil {
 			return err
 		}
-	}
-	if p.flusher != nil {
-		p.flusher.ResetUnflushed()
 	}
 	return nil
 }

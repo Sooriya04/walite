@@ -346,3 +346,216 @@ func TestPartition_ConcurrentReadDuringTruncation(t *testing.T) {
 	atomic.StoreInt32(&stopFlag, 1)
 	wg.Wait()
 }
+
+func TestPartition_FsyncDoesNotBlockReaders(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.PartitionConfig{
+		Directory:          tempDir,
+		MaxSegmentBytes:    1024 * 1024,
+		IndexIntervalBytes: 64,
+		Flush: log.FlusherConfig{
+			Policy: log.SyncAlways,
+		},
+	}
+
+	p, err := log.OpenPartition(cfg)
+	if err != nil {
+		t.Fatalf("failed open partition: %v", err)
+	}
+	defer p.Close()
+
+	// Pre-populate with 20 records
+	for i := 0; i < 20; i++ {
+		_, err := p.Append(&log.Record{Value: []byte(fmt.Sprintf("initial-%d", i))})
+		if err != nil {
+			t.Fatalf("failed initial append %d: %v", i, err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	var stopFlag int32
+	var readCount int64
+
+	// Concurrent readers reading historical records concurrently
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func(readerID int) {
+			defer wg.Done()
+			for atomic.LoadInt32(&stopFlag) == 0 {
+				target := uint64(readerID % 20)
+				rec, err := p.ReadAt(target)
+				if err != nil {
+					t.Errorf("reader %d failed reading offset %d: %v", readerID, target, err)
+					return
+				}
+				if len(rec.Value) == 0 {
+					t.Errorf("reader %d read empty value at offset %d", readerID, target)
+					return
+				}
+				atomic.AddInt64(&readCount, 1)
+			}
+		}(r)
+	}
+
+	// Producer appending records with SyncAlways active (each append triggers active.Sync)
+	for i := 0; i < 50; i++ {
+		_, err := p.Append(&log.Record{Value: []byte(fmt.Sprintf("sync-record-%d", i))})
+		if err != nil {
+			t.Fatalf("append %d failed: %v", i, err)
+		}
+	}
+
+	// Also execute explicit Partition.Sync concurrently
+	if err := p.Sync(); err != nil {
+		t.Fatalf("partition sync failed: %v", err)
+	}
+
+	atomic.StoreInt32(&stopFlag, 1)
+	wg.Wait()
+
+	if atomic.LoadInt64(&readCount) == 0 {
+		t.Fatalf("expected concurrent reads to succeed during fsync, got 0")
+	}
+}
+
+func TestPartition_RolloverBoundsAndExactCapacity(t *testing.T) {
+	tempDir := t.TempDir()
+	maxSegBytes := uint64(100)
+	cfg := log.PartitionConfig{
+		Directory:          tempDir,
+		MaxSegmentBytes:    maxSegBytes,
+		IndexIntervalBytes: 32,
+	}
+
+	p, err := log.OpenPartition(cfg)
+	if err != nil {
+		t.Fatalf("failed open partition: %v", err)
+	}
+	defer p.Close()
+
+	// A record with encoded size exactly equal to MaxSegmentBytes:
+	// HeaderSize = 28 bytes. Key = 0 bytes. Value = 72 bytes. Total = 100 bytes.
+	exactRecord := &log.Record{
+		Value: bytes.Repeat([]byte("e"), int(maxSegBytes-uint64(log.HeaderSize))),
+	}
+	offset0, err := p.Append(exactRecord)
+	if err != nil {
+		t.Fatalf("expected exact capacity record to succeed, got %v", err)
+	}
+	if offset0 != 0 {
+		t.Fatalf("expected offset 0, got %d", offset0)
+	}
+
+	// Second append of exact capacity record triggers rollover cleanly to segment 1
+	offset1, err := p.Append(exactRecord)
+	if err != nil {
+		t.Fatalf("expected second exact capacity record to rotate and succeed, got %v", err)
+	}
+	if offset1 != 1 {
+		t.Fatalf("expected offset 1, got %d", offset1)
+	}
+	if p.SegmentsCount() != 2 {
+		t.Fatalf("expected 2 segments after rollover, got %d", p.SegmentsCount())
+	}
+
+	// Attempt to append record with size MaxSegmentBytes + 1 (101 bytes)
+	oversized := &log.Record{
+		Value: bytes.Repeat([]byte("o"), int(maxSegBytes-uint64(log.HeaderSize)+1)),
+	}
+	_, err = p.Append(oversized)
+	if !errors.Is(err, log.ErrRecordExceedsSegmentSize) {
+		t.Fatalf("expected ErrRecordExceedsSegmentSize, got %v", err)
+	}
+
+	// Multiple consecutive oversized attempts should not mutate state
+	for i := 0; i < 3; i++ {
+		_, err := p.Append(oversized)
+		if !errors.Is(err, log.ErrRecordExceedsSegmentSize) {
+			t.Fatalf("expected ErrRecordExceedsSegmentSize, got %v", err)
+		}
+	}
+	if p.SegmentsCount() != 2 {
+		t.Fatalf("expected segment count to remain 2, got %d", p.SegmentsCount())
+	}
+
+	// Normal append succeeds cleanly at next sequential offset
+	normal := &log.Record{Value: []byte("norm")}
+	offset2, err := p.Append(normal)
+	if err != nil {
+		t.Fatalf("failed normal append: %v", err)
+	}
+	if offset2 != 2 {
+		t.Fatalf("expected offset 2, got %d", offset2)
+	}
+}
+
+func TestPartition_RetentionEdgeCases(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.PartitionConfig{
+		Directory:          tempDir,
+		MaxSegmentBytes:    100,
+		IndexIntervalBytes: 32,
+		Cleaner: log.CleanerConfig{
+			MaxPartitionBytes: 50, // Smaller than single segment
+		},
+	}
+
+	p, err := log.OpenPartition(cfg)
+	if err != nil {
+		t.Fatalf("failed open partition: %v", err)
+	}
+	defer p.Close()
+
+	// TruncateBefore(0) on fresh partition is no-op
+	pruned, err := p.TruncateBefore(0)
+	if err != nil {
+		t.Fatalf("truncate 0 failed: %v", err)
+	}
+	if pruned != 0 {
+		t.Fatalf("expected 0 pruned, got %d", pruned)
+	}
+
+	// Append records to create 4 segments
+	for i := 0; i < 10; i++ {
+		_, err := p.Append(&log.Record{Value: []byte("retention-edge-payload")})
+		if err != nil {
+			t.Fatalf("append %d failed: %v", i, err)
+		}
+	}
+	if p.SegmentsCount() < 3 {
+		t.Fatalf("expected at least 3 segments, got %d", p.SegmentsCount())
+	}
+
+	// CleanSegments with MaxPartitionBytes < 1 segment must retain active segment
+	pruned, err = p.CleanSegments()
+	if err != nil {
+		t.Fatalf("CleanSegments failed: %v", err)
+	}
+	if p.SegmentsCount() != 1 {
+		t.Fatalf("expected exactly 1 active segment preserved, got %d", p.SegmentsCount())
+	}
+
+	// Active segment must remain fully writable
+	off, err := p.Append(&log.Record{Value: []byte("still-alive")})
+	if err != nil {
+		t.Fatalf("append after full retention failed: %v", err)
+	}
+	if off != 10 {
+		t.Fatalf("expected offset 10, got %d", off)
+	}
+
+	// Reading pruned offset returns ErrOffsetOutOfRange
+	_, err = p.ReadAt(0)
+	if !errors.Is(err, log.ErrOffsetOutOfRange) {
+		t.Fatalf("expected ErrOffsetOutOfRange for pruned offset 0, got %v", err)
+	}
+
+	// Reading active record succeeds
+	rec, err := p.ReadAt(off)
+	if err != nil {
+		t.Fatalf("read active offset failed: %v", err)
+	}
+	if !bytes.Equal(rec.Value, []byte("still-alive")) {
+		t.Fatalf("unexpected value: %s", rec.Value)
+	}
+}
