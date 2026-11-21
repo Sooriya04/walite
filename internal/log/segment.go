@@ -189,6 +189,8 @@ func (s *Segment) Append(rec *Record) (uint64, error) {
 	// Sparse indexing: write index entry only after log write succeeds
 	if s.bytesSinceIdx >= s.indexInterval || s.curBytes == 0 {
 		if err := s.index.WriteEntry(relOffset, pos); err != nil {
+			_ = s.logFile.Truncate(int64(pos))
+			_, _ = s.logFile.Seek(int64(pos), io.SeekStart)
 			return 0, fmt.Errorf("failed to write index entry: %w", err)
 		}
 		s.bytesSinceIdx = 0
@@ -253,6 +255,16 @@ func (s *Segment) ReadAt(targetOffset uint64) (*Record, error) {
 			return nil, io.EOF
 		}
 
+		recOffset := binary.BigEndian.Uint64(headerBuf[0:8])
+		if recOffset < targetOffset {
+			// Fast-skip intermediary records: advance offset without payload disk reads or memory allocations
+			curPos += totalRecordLen
+			continue
+		}
+		if recOffset > targetOffset {
+			return nil, io.EOF
+		}
+
 		fullBuf := make([]byte, totalRecordLen)
 		copy(fullBuf[:HeaderSize], headerBuf)
 
@@ -271,14 +283,7 @@ func (s *Segment) ReadAt(targetOffset uint64) (*Record, error) {
 			return nil, err
 		}
 
-		if rec.Offset == targetOffset {
-			return rec, nil
-		}
-		if rec.Offset > targetOffset {
-			return nil, io.EOF
-		}
-
-		curPos += totalRecordLen
+		return rec, nil
 	}
 
 	return nil, io.EOF
@@ -474,6 +479,7 @@ func (s *Segment) Close() error {
 	if s.closed {
 		return nil
 	}
+	s.closed = true
 
 	var firstErr error
 	if err := s.logFile.Sync(); err != nil && firstErr == nil {
@@ -486,7 +492,6 @@ func (s *Segment) Close() error {
 		firstErr = err
 	}
 
-	s.closed = true
 	return firstErr
 }
 

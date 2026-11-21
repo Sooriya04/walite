@@ -227,6 +227,34 @@ func TestIndex_ClosedOperations(t *testing.T) {
 	if err := idx.Sync(); err != os.ErrClosed {
 		t.Fatalf("expected os.ErrClosed on Sync, got %v", err)
 	}
+	if _, err := idx.ReadAt(0); err != os.ErrClosed {
+		t.Fatalf("expected os.ErrClosed on ReadAt, got %v", err)
+	}
+	if _, err := idx.Lookup(0); err != os.ErrClosed {
+		t.Fatalf("expected os.ErrClosed on Lookup, got %v", err)
+	}
+}
+
+func TestIndex_MonotonicRelativeOffset(t *testing.T) {
+	tempDir := t.TempDir()
+	indexPath := filepath.Join(tempDir, "monotonic.index")
+
+	idx, err := log.OpenIndex(indexPath)
+	if err != nil {
+		t.Fatalf("failed to open index: %v", err)
+	}
+	defer idx.Close()
+
+	if err := idx.WriteEntry(10, 100); err != nil {
+		t.Fatalf("first write failed: %v", err)
+	}
+	if err := idx.WriteEntry(10, 200); err != nil {
+		t.Fatalf("non-decreasing write failed: %v", err)
+	}
+	// Strictly decreasing relativeOffset must fail
+	if err := idx.WriteEntry(9, 300); err == nil {
+		t.Fatalf("expected error on decreasing relativeOffset, got nil")
+	}
 }
 
 func BenchmarkIndex_Lookup(b *testing.B) {
