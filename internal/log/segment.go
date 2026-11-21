@@ -41,6 +41,7 @@ type SegmentConfig struct {
 // and a paired `.index` binary sparse lookup file.
 type Segment struct {
 	mu            sync.RWMutex
+	dir           string
 	baseOffset    uint64
 	nextOffset    uint64
 	maxBytes      uint64
@@ -89,6 +90,7 @@ func OpenSegment(cfg SegmentConfig) (*Segment, error) {
 	}
 
 	seg := &Segment{
+		dir:           cfg.Directory,
 		baseOffset:    cfg.BaseOffset,
 		nextOffset:    cfg.BaseOffset,
 		maxBytes:      cfg.MaxBytes,
@@ -114,11 +116,15 @@ func (s *Segment) BaseOffset() uint64 {
 func (s *Segment) NextSegmentConfig(maxBytes uint64, indexInterval uint32) SegmentConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	dir := s.dir
+	if dir == "" && s.logFile != nil {
+		dir = filepath.Dir(s.logFile.Name())
+	}
 	return SegmentConfig{
 		BaseOffset:         s.nextOffset,
 		MaxBytes:           maxBytes,
 		IndexIntervalBytes: indexInterval,
-		Directory:          filepath.Dir(s.logFile.Name()),
+		Directory:          dir,
 	}
 }
 
@@ -521,11 +527,15 @@ func (s *Segment) Remove() error {
 	defer s.mu.Unlock()
 
 	var logPath, indexPath string
-	if s.logFile != nil {
+	if s.dir != "" {
+		logPath = filepath.Join(s.dir, FormatSegmentFileName(s.baseOffset, ".log"))
+		indexPath = filepath.Join(s.dir, FormatSegmentFileName(s.baseOffset, ".index"))
+	} else if s.logFile != nil {
 		logPath = s.logFile.Name()
+		indexPath = filepath.Join(filepath.Dir(logPath), FormatSegmentFileName(s.baseOffset, ".index"))
 	}
-	if s.index != nil && s.index.file != nil {
-		indexPath = s.index.file.Name()
+	if indexPath == "" && s.index != nil {
+		indexPath = s.index.Path()
 	}
 
 	if !s.closed {

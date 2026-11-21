@@ -747,6 +747,54 @@ func TestSegment_ReadAtFastSkip(t *testing.T) {
 	}
 }
 
+func TestSegment_RemoveAfterCloseDeletesIndexFile(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.SegmentConfig{
+		BaseOffset:         0,
+		MaxBytes:           1024,
+		IndexIntervalBytes: 32,
+		Directory:          tempDir,
+	}
+
+	seg, err := log.OpenSegment(cfg)
+	if err != nil {
+		t.Fatalf("failed open segment: %v", err)
+	}
+
+	// Write record to ensure index file has content
+	if _, err := seg.Append(&log.Record{Value: []byte("sample-data")}); err != nil {
+		t.Fatalf("failed append: %v", err)
+	}
+
+	logPath := filepath.Join(tempDir, log.FormatSegmentFileName(0, ".log"))
+	indexPath := filepath.Join(tempDir, log.FormatSegmentFileName(0, ".index"))
+
+	// Ensure files exist before close
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("expected log file to exist before close: %v", err)
+	}
+	if _, err := os.Stat(indexPath); err != nil {
+		t.Fatalf("expected index file to exist before close: %v", err)
+	}
+
+	// Close the segment first (which closes s.index and sets s.index.file = nil)
+	if err := seg.Close(); err != nil {
+		t.Fatalf("failed close: %v", err)
+	}
+
+	// Remove must still delete both .log AND .index files from disk without orphaning
+	if err := seg.Remove(); err != nil {
+		t.Fatalf("failed remove after close: %v", err)
+	}
+
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("expected log file to be removed after Remove(), but still exists")
+	}
+	if _, err := os.Stat(indexPath); !os.IsNotExist(err) {
+		t.Fatalf("expected index file to be removed after Remove(), but orphaned index file remains")
+	}
+}
+
 func BenchmarkSegment_Append(b *testing.B) {
 	tempDir := b.TempDir()
 	cfg := log.SegmentConfig{

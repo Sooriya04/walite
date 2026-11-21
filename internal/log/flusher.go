@@ -113,15 +113,13 @@ func (f *Flusher) OnAppend(recordBytes uint64) bool {
 	if f == nil {
 		return false
 	}
-	atomic.AddUint64(&f.unflushedMsgs, 1)
-	atomic.AddUint64(&f.unflushedBytes, recordBytes)
+	msgs := atomic.AddUint64(&f.unflushedMsgs, 1)
+	bytes := atomic.AddUint64(&f.unflushedBytes, recordBytes)
 
 	switch f.cfg.Policy {
 	case SyncAlways:
 		return true
 	case SyncBatch:
-		msgs := atomic.LoadUint64(&f.unflushedMsgs)
-		bytes := atomic.LoadUint64(&f.unflushedBytes)
 		if f.cfg.BatchMessages > 0 && msgs >= f.cfg.BatchMessages {
 			return true
 		}

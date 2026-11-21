@@ -41,6 +41,7 @@ type IndexEntry struct {
 // entry cache for zero-syscall lookups.
 type Index struct {
 	mu      sync.RWMutex
+	path    string
 	file    *os.File
 	entries []IndexEntry
 }
@@ -87,9 +88,17 @@ func OpenIndex(path string) (*Index, error) {
 	}
 
 	return &Index{
+		path:    path,
 		file:    file,
 		entries: entries,
 	}, nil
+}
+
+// Path returns the filesystem path of the index file.
+func (idx *Index) Path() string {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.path
 }
 
 // EntriesCount returns the total number of entries currently stored in the index.
