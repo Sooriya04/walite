@@ -20,11 +20,12 @@ var (
 	ErrOffsetOutOfRange = errors.New("walite: requested offset is out of range")
 )
 
-// PartitionConfig specifies directory paths and rollover thresholds for a partition.
+// PartitionConfig specifies directory paths, rollover thresholds, and durability flush policies.
 type PartitionConfig struct {
 	Directory          string
 	MaxSegmentBytes    uint64
 	IndexIntervalBytes uint32
+	Flush              FlusherConfig
 }
 
 // Partition manages an active write-head segment and a list of sealed historical segments.
@@ -34,6 +35,7 @@ type Partition struct {
 	cfg      PartitionConfig
 	segments []*Segment
 	active   *Segment
+	flusher  *Flusher
 	closed   bool
 }
 
@@ -61,6 +63,8 @@ func OpenPartition(cfg PartitionConfig) (*Partition, error) {
 		_ = p.Close()
 		return nil, err
 	}
+
+	p.flusher = NewFlusher(cfg.Flush, p.Sync)
 
 	return p, nil
 }
@@ -137,24 +141,36 @@ func (p *Partition) Append(rec *Record) (uint64, error) {
 	}
 
 	offset, err := p.active.Append(rec)
-	if err == nil {
-		return offset, nil
-	}
-
 	if errors.Is(err, ErrSegmentFull) {
 		if err := p.rotateActiveSegmentLocked(); err != nil {
 			return 0, fmt.Errorf("failed to rotate segment: %w", err)
 		}
 		// Retry append on new active segment
-		return p.active.Append(rec)
+		offset, err = p.active.Append(rec)
+	}
+	if err != nil {
+		return 0, err
 	}
 
-	return 0, err
+	if p.flusher != nil {
+		recordBytes := uint64(HeaderSize + len(rec.Key) + len(rec.Value))
+		if p.flusher.OnAppend(recordBytes) {
+			if err := p.active.Sync(); err != nil {
+				return 0, fmt.Errorf("failed to sync active segment: %w", err)
+			}
+			p.flusher.ResetUnflushed()
+		}
+	}
+
+	return offset, nil
 }
 
 func (p *Partition) rotateActiveSegmentLocked() error {
 	if err := p.active.Sync(); err != nil {
 		return fmt.Errorf("failed to sync active segment before rollover: %w", err)
+	}
+	if p.flusher != nil {
+		p.flusher.ResetUnflushed()
 	}
 
 	nextCfg := p.active.NextSegmentConfig(p.cfg.MaxSegmentBytes, p.cfg.IndexIntervalBytes)
@@ -241,7 +257,12 @@ func (p *Partition) SegmentsCount() int {
 	return len(p.segments)
 }
 
-// Sync flushes data in all segments to disk.
+// Flusher returns the durability flusher instance attached to the partition.
+func (p *Partition) Flusher() *Flusher {
+	return p.flusher
+}
+
+// Sync flushes data in all segments to disk and resets unflushed counts.
 func (p *Partition) Sync() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -254,11 +275,18 @@ func (p *Partition) Sync() error {
 			return err
 		}
 	}
+	if p.flusher != nil {
+		p.flusher.ResetUnflushed()
+	}
 	return nil
 }
 
-// Close flushes and closes all underlying segments.
+// Close flushes and closes all underlying segments and stops any background flusher.
 func (p *Partition) Close() error {
+	if p.flusher != nil {
+		p.flusher.Stop()
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
