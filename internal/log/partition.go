@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
@@ -20,12 +21,13 @@ var (
 	ErrOffsetOutOfRange = errors.New("walite: requested offset is out of range")
 )
 
-// PartitionConfig specifies directory paths, rollover thresholds, and durability flush policies.
+// PartitionConfig specifies directory paths, rollover thresholds, durability flush policies, and retention policies.
 type PartitionConfig struct {
 	Directory          string
 	MaxSegmentBytes    uint64
 	IndexIntervalBytes uint32
 	Flush              FlusherConfig
+	Cleaner            CleanerConfig
 }
 
 // Partition manages an active write-head segment and a list of sealed historical segments.
@@ -36,6 +38,7 @@ type Partition struct {
 	segments []*Segment
 	active   *Segment
 	flusher  *Flusher
+	cleaner  *Cleaner
 	closed   bool
 }
 
@@ -65,6 +68,7 @@ func OpenPartition(cfg PartitionConfig) (*Partition, error) {
 	}
 
 	p.flusher = NewFlusher(cfg.Flush, p.Sync)
+	p.cleaner = NewCleaner(cfg.Cleaner, p.CleanSegments)
 
 	return p, nil
 }
@@ -281,8 +285,115 @@ func (p *Partition) Sync() error {
 	return nil
 }
 
-// Close flushes and closes all underlying segments and stops any background flusher.
+// Cleaner returns the retention cleaner instance attached to the partition.
+func (p *Partition) Cleaner() *Cleaner {
+	return p.cleaner
+}
+
+// OldestOffset returns the lowest base offset currently available in the partition.
+func (p *Partition) OldestOffset() uint64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if len(p.segments) == 0 {
+		return 0
+	}
+	return p.segments[0].BaseOffset()
+}
+
+// TotalBytes returns the sum of current log data sizes across all partition segments.
+func (p *Partition) TotalBytes() uint64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	total := uint64(0)
+	for _, seg := range p.segments {
+		total += seg.CurrentSize()
+	}
+	return total
+}
+
+// TruncateBefore permanently deletes sealed historical segments whose next offset is less than
+// or equal to targetOffset. The active head segment is never deleted.
+func (p *Partition) TruncateBefore(targetOffset uint64) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return 0, os.ErrClosed
+	}
+
+	deletedCount := 0
+	for len(p.segments) > 1 {
+		oldest := p.segments[0]
+		if oldest.NextOffset() <= targetOffset {
+			if err := oldest.Remove(); err != nil {
+				return deletedCount, fmt.Errorf("failed to remove segment at base %d: %w", oldest.BaseOffset(), err)
+			}
+			p.segments = p.segments[1:]
+			deletedCount++
+		} else {
+			break
+		}
+	}
+
+	return deletedCount, nil
+}
+
+// CleanSegments applies configured retention policies (MaxRetentionAge and MaxPartitionBytes)
+// to purge eligible historical segments. The active head segment is never deleted.
+func (p *Partition) CleanSegments() (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return 0, os.ErrClosed
+	}
+
+	deletedCount := 0
+
+	// 1. Time-based retention
+	if p.cfg.Cleaner.MaxRetentionAge > 0 {
+		cutoff := time.Now().Add(-p.cfg.Cleaner.MaxRetentionAge)
+		for len(p.segments) > 1 {
+			oldest := p.segments[0]
+			if oldest.ModTime().Before(cutoff) {
+				if err := oldest.Remove(); err != nil {
+					return deletedCount, fmt.Errorf("failed to remove aged segment at base %d: %w", oldest.BaseOffset(), err)
+				}
+				p.segments = p.segments[1:]
+				deletedCount++
+			} else {
+				break
+			}
+		}
+	}
+
+	// 2. Size-based retention
+	if p.cfg.Cleaner.MaxPartitionBytes > 0 {
+		totalBytes := uint64(0)
+		for _, seg := range p.segments {
+			totalBytes += seg.CurrentSize()
+		}
+
+		for len(p.segments) > 1 && totalBytes > p.cfg.Cleaner.MaxPartitionBytes {
+			oldest := p.segments[0]
+			segSize := oldest.CurrentSize()
+			if err := oldest.Remove(); err != nil {
+				return deletedCount, fmt.Errorf("failed to remove oversized segment at base %d: %w", oldest.BaseOffset(), err)
+			}
+			p.segments = p.segments[1:]
+			totalBytes -= segSize
+			deletedCount++
+		}
+	}
+
+	return deletedCount, nil
+}
+
+// Close flushes and closes all underlying segments and stops background flusher and cleaner.
 func (p *Partition) Close() error {
+	if p.cleaner != nil {
+		p.cleaner.Stop()
+	}
 	if p.flusher != nil {
 		p.flusher.Stop()
 	}
