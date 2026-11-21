@@ -1,3 +1,7 @@
+// Package: log
+// File: partition_test.go
+// Core Work: Unit verification for zero modTime segment protection and empty active rollover guards
+// Exported: None
 package log
 
 import (
