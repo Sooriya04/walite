@@ -241,3 +241,55 @@ func TestPartition_ClosedOperations(t *testing.T) {
 		t.Fatalf("expected os.ErrClosed on Sync, got %v", err)
 	}
 }
+
+func TestPartition_AppendOversizedRecord(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := log.PartitionConfig{
+		Directory:          tempDir,
+		MaxSegmentBytes:    200,
+		IndexIntervalBytes: 64,
+	}
+
+	p, err := log.OpenPartition(cfg)
+	if err != nil {
+		t.Fatalf("failed open partition: %v", err)
+	}
+	defer p.Close()
+
+	// Append record exceeding MaxSegmentBytes (300B payload > 200B segment size)
+	oversized := &log.Record{
+		Key:   []byte("big-key"),
+		Value: bytes.Repeat([]byte("v"), 300),
+	}
+	_, err = p.Append(oversized)
+	if !errors.Is(err, log.ErrRecordExceedsSegmentSize) {
+		t.Fatalf("expected ErrRecordExceedsSegmentSize, got %v", err)
+	}
+
+	// Verify segment count remains 1 and active segment is not rotated into duplicate
+	if p.SegmentsCount() != 1 {
+		t.Fatalf("expected exactly 1 segment after oversized rejection, got %d", p.SegmentsCount())
+	}
+
+	// Normal append must still succeed cleanly at offset 0
+	normal := &log.Record{
+		Key:   []byte("k0"),
+		Value: []byte("val-0"),
+	}
+	offset, err := p.Append(normal)
+	if err != nil {
+		t.Fatalf("failed normal append: %v", err)
+	}
+	if offset != 0 {
+		t.Fatalf("expected offset 0, got %d", offset)
+	}
+
+	// Verify read succeeds
+	rec, err := p.ReadAt(0)
+	if err != nil {
+		t.Fatalf("failed read at 0: %v", err)
+	}
+	if !bytes.Equal(rec.Value, []byte("val-0")) {
+		t.Fatalf("unexpected value: %s", rec.Value)
+	}
+}
