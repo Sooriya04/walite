@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 var (
@@ -500,4 +501,53 @@ func (s *Segment) IndexEntriesCount() uint32 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.index.EntriesCount()
+}
+
+// ModTime returns the modification time of the underlying log file on disk.
+func (s *Segment) ModTime() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.logFile != nil {
+		if stat, err := s.logFile.Stat(); err == nil {
+			return stat.ModTime()
+		}
+	}
+	return time.Time{}
+}
+
+// Remove closes the segment and deletes both the .log and .index files from disk.
+func (s *Segment) Remove() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var logPath, indexPath string
+	if s.logFile != nil {
+		logPath = s.logFile.Name()
+	}
+	if s.index != nil && s.index.file != nil {
+		indexPath = s.index.file.Name()
+	}
+
+	if !s.closed {
+		s.closed = true
+		if s.logFile != nil {
+			_ = s.logFile.Close()
+		}
+		if s.index != nil {
+			_ = s.index.Close()
+		}
+	}
+
+	var firstErr error
+	if logPath != "" {
+		if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if indexPath != "" {
+		if err := os.Remove(indexPath); err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
