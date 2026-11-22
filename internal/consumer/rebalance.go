@@ -312,14 +312,17 @@ func (gc *GroupCoordinator) GetAssignments(memberID string) ([]PartitionTarget, 
 	return copied, gc.generation, nil
 }
 
-// ActiveMembers returns a list of all currently active consumer member IDs.
+// ActiveMembers returns a list of all currently active consumer member IDs whose heartbeats have not expired.
 func (gc *GroupCoordinator) ActiveMembers() []string {
 	gc.mu.RLock()
 	defer gc.mu.RUnlock()
 
+	now := time.Now()
 	members := make([]string, 0, len(gc.members))
-	for id := range gc.members {
-		members = append(members, id)
+	for id, member := range gc.members {
+		if now.Sub(member.LastSeen) <= gc.cfg.SessionTimeout {
+			members = append(members, id)
+		}
 	}
 	sort.Strings(members)
 	return members

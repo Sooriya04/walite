@@ -5,6 +5,7 @@
 package test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -503,5 +504,139 @@ func TestConsumer_DuplicatePreventionAndResumeExactOffset(t *testing.T) {
 		if allProcessed[i] != uint64(i) {
 			t.Fatalf("mismatched or duplicate offset at index %d: got %d", i, allProcessed[i])
 		}
+	}
+}
+
+func TestConsumer_OffsetManagerRecoveryAfterTruncation(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := consumer.OffsetManagerConfig{
+		Directory:       tempDir,
+		MaxSegmentBytes: 200, // Small segment to force multiple segments
+		SyncOnCommit:    true,
+	}
+
+	om, err := consumer.OpenOffsetManager(cfg)
+	if err != nil {
+		t.Fatalf("failed open offset manager: %v", err)
+	}
+
+	// Commit 15 checkpoints
+	for i := uint32(0); i < 15; i++ {
+		cp := consumer.Checkpoint{
+			GroupID:     "pruned-grp",
+			Topic:       "events",
+			PartitionID: i,
+			Offset:      uint64(500 + i),
+		}
+		if err := om.CommitOffset(cp); err != nil {
+			t.Fatalf("commit %d failed: %v", i, err)
+		}
+	}
+
+	// Truncate early offset segments
+	pruned, err := om.TruncateBefore(5)
+	if err != nil {
+		t.Fatalf("truncate failed: %v", err)
+	}
+	if pruned == 0 {
+		t.Fatalf("expected at least 1 pruned segment")
+	}
+
+	if err := om.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+
+	// Reopen offset manager: replayLog must start from OldestOffset and not abort at 0
+	reopened, err := consumer.OpenOffsetManager(cfg)
+	if err != nil {
+		t.Fatalf("reopen after truncation failed: %v", err)
+	}
+	defer reopened.Close()
+
+	// Verify the latest surviving checkpoint is present in cache
+	latestOffset, err := reopened.GetOffset("pruned-grp", "events", 14)
+	if err != nil {
+		t.Fatalf("failed to get checkpoint 14: %v", err)
+	}
+	if latestOffset != 514 {
+		t.Fatalf("expected offset 514, got %d", latestOffset)
+	}
+}
+
+func TestConsumer_OffsetManagerStringLengthGuards(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := consumer.OffsetManagerConfig{Directory: tempDir}
+
+	om, err := consumer.OpenOffsetManager(cfg)
+	if err != nil {
+		t.Fatalf("failed open offset manager: %v", err)
+	}
+	defer om.Close()
+
+	oversized := string(bytes.Repeat([]byte("a"), 65536))
+
+	// Oversized group
+	err = om.CommitOffset(consumer.Checkpoint{GroupID: oversized, Topic: "t", PartitionID: 0})
+	if !errors.Is(err, consumer.ErrInvalidCheckpoint) {
+		t.Fatalf("expected ErrInvalidCheckpoint for oversized group, got %v", err)
+	}
+
+	// Oversized topic
+	err = om.CommitOffset(consumer.Checkpoint{GroupID: "g", Topic: oversized, PartitionID: 0})
+	if !errors.Is(err, consumer.ErrInvalidCheckpoint) {
+		t.Fatalf("expected ErrInvalidCheckpoint for oversized topic, got %v", err)
+	}
+
+	// Oversized metadata
+	err = om.CommitOffset(consumer.Checkpoint{GroupID: "g", Topic: "t", PartitionID: 0, Metadata: oversized})
+	if !errors.Is(err, consumer.ErrInvalidCheckpoint) {
+		t.Fatalf("expected ErrInvalidCheckpoint for oversized metadata, got %v", err)
+	}
+}
+
+func TestConsumer_ActiveMembersTimeoutFiltering(t *testing.T) {
+	gc := consumer.NewGroupCoordinator(consumer.GroupCoordinatorConfig{
+		GroupID:        "timeout-filter-group",
+		SessionTimeout: 20 * time.Millisecond,
+	})
+
+	_, _ = gc.JoinGroup("member-active", []string{"topic-1"})
+	_, _ = gc.JoinGroup("member-dead", []string{"topic-1"})
+
+	time.Sleep(30 * time.Millisecond)
+
+	// Refresh heartbeat only for member-active
+	if err := gc.Heartbeat("member-active"); err != nil {
+		t.Fatalf("heartbeat failed: %v", err)
+	}
+
+	active := gc.ActiveMembers()
+	if len(active) != 1 || active[0] != "member-active" {
+		t.Fatalf("expected only member-active in ActiveMembers(), got %v", active)
+	}
+}
+
+func TestConsumer_OffsetManagerClosedQueries(t *testing.T) {
+	tempDir := t.TempDir()
+	om, err := consumer.OpenOffsetManager(consumer.OffsetManagerConfig{Directory: tempDir})
+	if err != nil {
+		t.Fatalf("failed open: %v", err)
+	}
+
+	if err := om.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+
+	if groups := om.ListGroups(); groups != nil {
+		t.Fatalf("expected nil from ListGroups on closed manager, got %v", groups)
+	}
+	if offsets := om.GetGroupOffsets("grp"); offsets != nil {
+		t.Fatalf("expected nil from GetGroupOffsets on closed manager, got %v", offsets)
+	}
+	if _, err := om.CleanSegments(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("expected os.ErrClosed on CleanSegments, got %v", err)
+	}
+	if _, err := om.TruncateBefore(1); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("expected os.ErrClosed on TruncateBefore, got %v", err)
 	}
 }
