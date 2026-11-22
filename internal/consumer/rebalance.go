@@ -85,7 +85,6 @@ type GroupCoordinator struct {
 	assignments map[string][]PartitionTarget
 	topics      map[string][]uint32
 	generation  uint64
-	closed      bool
 }
 
 // NewGroupCoordinator initializes a consumer group coordinator.
