@@ -15,8 +15,16 @@ import (
 )
 
 func (gc *GroupCoordinator) assignRange(memberIDs []string, assignments map[string][]PartitionTarget) {
+	// Collect and sort topics deterministically to prevent randomized map iteration
+	var sortedTopics []string
+	for topic := range gc.topics {
+		sortedTopics = append(sortedTopics, topic)
+	}
+	sort.Strings(sortedTopics)
+
 	// Group assignment by topic
-	for topic, partitions := range gc.topics {
+	for _, topic := range sortedTopics {
+		partitions := gc.topics[topic]
 		if len(partitions) == 0 {
 			continue
 		}
