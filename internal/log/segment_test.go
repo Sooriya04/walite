@@ -1,3 +1,7 @@
+// Package: log
+// File: segment_test.go
+// Core Work: Unit verification of segment log rollback on index write failure
+// Exported: none (test file)
 package log
 
 import (

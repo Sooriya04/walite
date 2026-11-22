@@ -1,8 +1,22 @@
 // Package: consumer
 // File: rebalance.go
-// Core Work: Consumer group partition assignment strategies, heartbeat liveness monitoring, and rebalancing
+// Core Work: Consumer group membership coordinator, heartbeat liveness, and rebalance lifecycle
 // Exported: AssignmentStrategy, StrategyRange, StrategyRoundRobin, MemberMetadata, PartitionTarget, GroupCoordinator, GroupCoordinatorConfig, NewGroupCoordinator, ErrConsumerNotFound, ErrGroupEmpty
 package consumer
+
+/*
+Functions Manifest & Usage:
+- (s AssignmentStrategy) String() string: Returns human-readable strategy name.
+- NewGroupCoordinator(cfg GroupCoordinatorConfig) *GroupCoordinator: Creates a new group coordinator instance.
+- (gc *GroupCoordinator) RegisterPartitions(topic string, partitions []uint32): Registers topic partition topology.
+- (gc *GroupCoordinator) JoinGroup(memberID string, topics []string) (uint64, error): Registers member and triggers rebalance.
+- (gc *GroupCoordinator) Heartbeat(memberID string) error: Updates heartbeat timestamp for member liveness.
+- (gc *GroupCoordinator) LeaveGroup(memberID string) error: Removes member and increments generation.
+- (gc *GroupCoordinator) Rebalance() (map[string][]PartitionTarget, uint64, error): Computes new partition assignments across members.
+- (gc *GroupCoordinator) GetAssignments(memberID string) ([]PartitionTarget, uint64, error): Returns assignments for a member.
+- (gc *GroupCoordinator) ActiveMembers() []string: Returns active non-timed-out member IDs.
+- (gc *GroupCoordinator) Generation() uint64: Returns current coordination epoch/generation.
+*/
 
 import (
 	"errors"
@@ -201,100 +215,6 @@ func (gc *GroupCoordinator) Rebalance() (map[string][]PartitionTarget, uint64, e
 	return res, gc.generation, nil
 }
 
-func (gc *GroupCoordinator) assignRange(memberIDs []string, assignments map[string][]PartitionTarget) {
-	// Group assignment by topic
-	for topic, partitions := range gc.topics {
-		if len(partitions) == 0 {
-			continue
-		}
-
-		// Find members subscribed to this topic
-		var subscribedMembers []string
-		for _, id := range memberIDs {
-			member := gc.members[id]
-			for _, t := range member.Topics {
-				if t == topic {
-					subscribedMembers = append(subscribedMembers, id)
-					break
-				}
-			}
-		}
-
-		if len(subscribedMembers) == 0 {
-			continue
-		}
-
-		numParts := len(partitions)
-		numMembers := len(subscribedMembers)
-
-		numPartsPerMember := numParts / numMembers
-		remainder := numParts % numMembers
-
-		partIdx := 0
-		for i, id := range subscribedMembers {
-			assignedCount := numPartsPerMember
-			if i < remainder {
-				assignedCount++
-			}
-
-			for c := 0; c < assignedCount && partIdx < numParts; c++ {
-				assignments[id] = append(assignments[id], PartitionTarget{
-					Topic:       topic,
-					PartitionID: partitions[partIdx],
-				})
-				partIdx++
-			}
-		}
-	}
-}
-
-func (gc *GroupCoordinator) assignRoundRobin(memberIDs []string, assignments map[string][]PartitionTarget) {
-	// Collect all registered partitions across topics and sort them deterministically
-	var allTargets []PartitionTarget
-	var sortedTopics []string
-	for topic := range gc.topics {
-		sortedTopics = append(sortedTopics, topic)
-	}
-	sort.Strings(sortedTopics)
-
-	for _, topic := range sortedTopics {
-		partitions := gc.topics[topic]
-		for _, partID := range partitions {
-			allTargets = append(allTargets, PartitionTarget{
-				Topic:       topic,
-				PartitionID: partID,
-			})
-		}
-	}
-
-	if len(allTargets) == 0 || len(memberIDs) == 0 {
-		return
-	}
-
-	// Round-robin distribution among members subscribed to each partition target
-	memberCursor := 0
-	for _, target := range allTargets {
-		// Find next subscribed member
-		for attempts := 0; attempts < len(memberIDs); attempts++ {
-			candidateID := memberIDs[memberCursor%len(memberIDs)]
-			memberCursor++
-
-			member := gc.members[candidateID]
-			subscribed := false
-			for _, t := range member.Topics {
-				if t == target.Topic {
-					subscribed = true
-					break
-				}
-			}
-
-			if subscribed {
-				assignments[candidateID] = append(assignments[candidateID], target)
-				break
-			}
-		}
-	}
-}
 
 // GetAssignments returns the assigned partitions and current generation for a member.
 func (gc *GroupCoordinator) GetAssignments(memberID string) ([]PartitionTarget, uint64, error) {
