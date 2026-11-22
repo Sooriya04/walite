@@ -163,16 +163,19 @@ func (idx *Index) ReadAt(entryIdx uint32) (IndexEntry, error) {
 // index entry whose RelativeOffset is <= targetRelOffset in O(log N) user-space steps without disk I/O.
 func (idx *Index) Lookup(targetRelOffset uint32) (IndexEntry, error) {
 	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-
 	if idx.file == nil {
+		idx.mu.RUnlock()
 		return IndexEntry{}, os.ErrClosed
 	}
 
 	n := len(idx.entries)
 	if n == 0 || targetRelOffset < idx.entries[0].RelativeOffset {
+		idx.mu.RUnlock()
 		return IndexEntry{}, ErrIndexOutOfBounds
 	}
+
+	entries := idx.entries
+	idx.mu.RUnlock()
 
 	low := 0
 	high := n - 1
@@ -180,7 +183,7 @@ func (idx *Index) Lookup(targetRelOffset uint32) (IndexEntry, error) {
 
 	for low <= high {
 		mid := low + (high-low)/2
-		if idx.entries[mid].RelativeOffset <= targetRelOffset {
+		if entries[mid].RelativeOffset <= targetRelOffset {
 			bestIdx = mid
 			low = mid + 1
 		} else {
@@ -188,7 +191,7 @@ func (idx *Index) Lookup(targetRelOffset uint32) (IndexEntry, error) {
 		}
 	}
 
-	return idx.entries[bestIdx], nil
+	return entries[bestIdx], nil
 }
 
 // Truncate resizes the index to contain exactly count entries, truncating physical file size and memory cache.
