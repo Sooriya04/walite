@@ -143,9 +143,6 @@ func (p *Partition) bootstrapSegments() error {
 	return nil
 }
 
-// Append appends a record to the partition. If the active segment is full,
-// it rotates to a new segment automatically and appends the record.
-
 func (p *Partition) Sync() error {
 	p.mu.Lock()
 	if p.closed {
@@ -164,8 +161,6 @@ func (p *Partition) Sync() error {
 	}
 	return nil
 }
-
-// Cleaner returns the retention cleaner instance attached to the partition.
 
 func (p *Partition) Close() error {
 	if p.cleaner != nil {

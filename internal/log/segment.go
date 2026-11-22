@@ -157,6 +157,3 @@ func (s *Segment) IsFull() bool {
 	}
 	return s.curBytes >= s.maxBytes
 }
-
-// Append appends a record payload to the segment log. If record.Offset does not match nextOffset,
-// it is stamped with nextOffset. If adding the record breaches maxBytes, ErrSegmentFull is returned.

@@ -166,8 +166,6 @@ func (om *OffsetManager) replayLog() error {
 	return nil
 }
 
-// CommitOffset records a consumer group checkpoint to persistent storage and updates the in-memory cache.
-
 func (om *OffsetManager) CleanSegments() (int, error) {
 	om.mu.Lock()
 	defer om.mu.Unlock()
@@ -211,6 +209,4 @@ func (om *OffsetManager) Close() error {
 	om.closed = true
 	return om.partition.Close()
 }
-
-// Binary serialization helpers
 
