@@ -127,10 +127,13 @@ func (idx *Index) WriteEntry(relativeOffset, position uint32) error {
 	binary.BigEndian.PutUint32(buf[4:8], position)
 
 	n, err := idx.file.Write(buf[:])
-	if err != nil {
-		return fmt.Errorf("failed to write index entry: %w", err)
-	}
-	if n != EntrySize {
+	if err != nil || n != EntrySize {
+		prevSize := int64(len(idx.entries) * EntrySize)
+		_ = idx.file.Truncate(prevSize)
+		_, _ = idx.file.Seek(prevSize, io.SeekStart)
+		if err != nil {
+			return fmt.Errorf("failed to write index entry: %w", err)
+		}
 		return io.ErrShortWrite
 	}
 
