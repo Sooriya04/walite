@@ -50,10 +50,12 @@ func (s *Segment) Append(rec *Record) (uint64, error) {
 	relOffset := uint32(rec.Offset - s.baseOffset)
 
 	n, err := s.logFile.Write(s.appendBuf)
-	if err != nil {
-		return 0, fmt.Errorf("failed to write record to log: %w", err)
-	}
-	if n != len(s.appendBuf) {
+	if err != nil || n != len(s.appendBuf) {
+		_ = s.logFile.Truncate(int64(pos))
+		_, _ = s.logFile.Seek(int64(pos), io.SeekStart)
+		if err != nil {
+			return 0, fmt.Errorf("failed to write record to log: %w", err)
+		}
 		return 0, io.ErrShortWrite
 	}
 
