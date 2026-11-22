@@ -106,12 +106,25 @@ func (gc *GroupCoordinator) RegisterPartitions(topic string, partitions []uint32
 	gc.mu.Lock()
 	defer gc.mu.Unlock()
 
+	if len(partitions) == 0 {
+		gc.topics[topic] = nil
+		return
+	}
+
 	partsCopy := make([]uint32, len(partitions))
 	copy(partsCopy, partitions)
 	sort.Slice(partsCopy, func(i, j int) bool {
 		return partsCopy[i] < partsCopy[j]
 	})
-	gc.topics[topic] = partsCopy
+
+	dedupIdx := 0
+	for i := 1; i < len(partsCopy); i++ {
+		if partsCopy[i] != partsCopy[dedupIdx] {
+			dedupIdx++
+			partsCopy[dedupIdx] = partsCopy[i]
+		}
+	}
+	gc.topics[topic] = partsCopy[:dedupIdx+1]
 }
 
 // JoinGroup registers or updates a consumer member's subscriptions and refreshes its heartbeat.
