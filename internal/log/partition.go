@@ -153,17 +153,14 @@ func (p *Partition) Sync() error {
 		return os.ErrClosed
 	}
 
-	segs := make([]*Segment, len(p.segments))
-	copy(segs, p.segments)
+	active := p.active
 	if p.flusher != nil {
 		p.flusher.ResetUnflushed()
 	}
 	p.mu.Unlock()
 
-	for _, seg := range segs {
-		if err := seg.Sync(); err != nil {
-			return err
-		}
+	if active != nil {
+		return active.Sync()
 	}
 	return nil
 }
