@@ -41,15 +41,19 @@
     - `BenchmarkProtocol_EncodeFrame` & `BenchmarkProtocol_ReadFrame`: Benchmarks asserting zero-alloc hot path.
 
 ### Task 4.3: High-Throughput `walited` TCP Server Daemon
-- **Status:** PENDING / READY TO IMPLEMENT
+- **Status:** COMPLETED
 - **Components:**
-  - `cmd/walited/server.go`:
-    - Pure Go `net.Listener` socket server.
+  - `internal/server/config.go`: Sane defaults, connection timeouts, and partition configuration.
+  - `internal/server/server.go`:
+    - Pure Go stdlib `net.Listener` concurrent TCP server.
     - Central routing registry for active `log.Partition` instances and consumer `OffsetManager`.
-    - Per-connection worker goroutines with reusable read/write buffers.
+    - Per-connection worker goroutines handling framed streams for `PRODUCE`, `CONSUME`, `OFFSET_GET`, `OFFSET_COMMIT`, and `PING`.
+    - Dynamic partition auto-provisioning and graceful drain (<2s) syncing storage to disk.
   - `cmd/walited/main.go`:
-    - CLI entrypoint, flag parsing (`--addr`, `--dir`, `--flush-interval`).
-    - OS signal handler (`SIGINT`, `SIGTERM`) triggering graceful drain (<2s) and flushing partitions to disk via `Sync()`.
+    - CLI entrypoint, flag parsing (`--addr`, `--dir`, `--flush`, `--max-segment`, `--sync`).
+    - OS signal handler (`SIGINT`, `SIGTERM`) triggering graceful server shutdown.
+  - `internal/server/server_test.go`:
+    - Integration tests covering startup/teardown, produce batch and consume, offset commit/query, and partition missing error handling.
 
 ### Task 4.4: End-to-End Integration Smoke Test
 - **Status:** PENDING
