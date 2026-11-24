@@ -1,0 +1,72 @@
+# walite Phase 4 & 5 Engineering Tasks
+
+## Repository Status
+- **Maintainers:** Barbara Vane (`barbaravane`), Sooriya (`Sooriya04`)
+- **Active Phase:** Phase 4 (Wire Protocol & TCP Daemon)
+- **Target Invariants:** Zero external dependencies (pure Go stdlib), mandatory 5-line technical headers, function manifests, zero-alloc hot path, and crash durability.
+
+---
+
+## Phase 4 Task Breakdown & Live Status
+
+### Task 4.1: Wire Protocol Binary Framing & Codec
+- **Status:** COMPLETED (Commit `30c3a6c`)
+- **Deliverables:**
+  - `internal/protocol/codec.go`: Length-prefixed binary framing layout:
+    `[FrameLen: 4B][Magic: 2B (0x574C)][Version: 1B (0x01)][OpCode: 1B][Payload (FrameLen - 4B)]`
+  - Zero-allocation header pooling via `sync.Pool`.
+  - Boundary guards: Hard 16MB frame ceiling (`MaxFrameBytes`), `ErrInvalidMagic`, `ErrUnsupportedVersion`, `ErrInvalidFrameLen`, `ErrTruncatedFrame`.
+  - `internal/protocol/messages.go`: Typed binary request and response serializers for:
+    - `0x01` / `0x81`: `PRODUCE_REQ` / `PRODUCE_RESP`
+    - `0x02` / `0x82`: `CONSUME_REQ` / `CONSUME_RESP`
+    - `0x03` / `0x83`: `OFFSET_REQ` / `OFFSET_RESP`
+    - `0x04` / `0x84`: `COMMIT_REQ` / `COMMIT_RESP`
+    - `0x05` / `0x85`: `PING_REQ` / `PONG_RESP`
+
+### Task 4.2: Codec Verification Suite & Transport Benchmarks
+- **Status:** COMPLETED
+- **Deliverables:**
+  - `test/protocol_test.go`:
+    - `TestProtocol_FrameRoundtrip`: Validates empty, small, and multi-KB payloads.
+    - `TestProtocol_InvalidMagic`: Verifies rejection of non-0x574C magic bytes.
+    - `TestProtocol_UnsupportedVersion`: Enforces protocol version 0x01.
+    - `TestProtocol_FrameTooLarge`: Blocks packets exceeding 16MB ceiling.
+    - `TestProtocol_TruncatedFrame`: Clean EOF handling without panics or leaks.
+    - `TestProtocol_ProduceRoundtrip`: Serializes/deserializes multi-record batches with CRC32.
+    - `TestProtocol_ConsumeRoundtrip`: Offset-bounded record fetch validation.
+    - `TestProtocol_OffsetRoundtrip` & `TestProtocol_CommitRoundtrip`: Consumer group checkpoint wire verification.
+    - `TestProtocol_PingPongRoundtrip`: Echo heartbeat verification.
+    - `TestProtocol_MalformedPayloads`: Slicing boundary and truncated stream safety.
+    - `TestProtocol_NetPipeTransport`: Validates bi-directional streaming over `net.Pipe()`.
+    - `BenchmarkProtocol_EncodeFrame` & `BenchmarkProtocol_ReadFrame`: Benchmarks asserting zero-alloc hot path.
+
+### Task 4.3: High-Throughput `walited` TCP Server Daemon
+- **Status:** PENDING / READY TO IMPLEMENT
+- **Components:**
+  - `cmd/walited/server.go`:
+    - Pure Go `net.Listener` socket server.
+    - Central routing registry for active `log.Partition` instances and consumer `OffsetManager`.
+    - Per-connection worker goroutines with reusable read/write buffers.
+  - `cmd/walited/main.go`:
+    - CLI entrypoint, flag parsing (`--addr`, `--dir`, `--flush-interval`).
+    - OS signal handler (`SIGINT`, `SIGTERM`) triggering graceful drain (<2s) and flushing partitions to disk via `Sync()`.
+
+### Task 4.4: End-to-End Integration Smoke Test
+- **Status:** PENDING
+- **Deliverables:**
+  - `test/smoke_test.go`:
+    - Boots `walited` on an ephemeral TCP port (`127.0.0.1:0`).
+    - Produces batches concurrently, consumes back, and validates offsets and CRC integrity.
+    - Commits consumer group offsets, disconnects, reconnects, and asserts seamless cursor resumption.
+    - Triggers graceful shutdown and asserts zero torn writes.
+
+---
+
+## Phase 5 Task Breakdown (Ahead)
+
+### Task 5.1: Client SDK (`pkg/walite/`)
+- Public Go client library supporting `walite.Open()` (embedded engine) and `walite.Dial()` (network TCP client).
+- Idiomatic Producer and Consumer group APIs.
+
+### Task 5.2: CLI Diagnostics Utility (`cmd/walite/`)
+- Segment inspector, CRC32 verifier, and throughput latency benchmarking CLI.

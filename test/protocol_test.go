@@ -17,6 +17,9 @@ Functions Manifest & Usage:
 - TestProtocol_CommitRoundtrip(t *testing.T): Verifies binary serialization and recovery of CommitReq and CommitResp.
 - TestProtocol_PingPongRoundtrip(t *testing.T): Verifies heartbeat echo serialization.
 - TestProtocol_MalformedPayloads(t *testing.T): Tests bounds checks and error handling for malformed/truncated payloads.
+- TestProtocol_NetPipeTransport(t *testing.T): Validates duplex stream communication over a simulated network connection.
+- BenchmarkProtocol_EncodeFrame(b *testing.B): Measures framing serialization latency and heap allocations.
+- BenchmarkProtocol_ReadFrame(b *testing.B): Measures framing deserialization latency and heap allocations.
 */
 
 import (
@@ -24,6 +27,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"net"
 	"reflect"
 	"testing"
 	"time"
@@ -322,5 +326,68 @@ func TestProtocol_MalformedPayloads(t *testing.T) {
 	}
 	if _, err := protocol.DecodeCommitResp(nil); !errors.Is(err, protocol.ErrMalformedPayload) {
 		t.Fatalf("expected ErrMalformedPayload for empty commit resp, got %v", err)
+	}
+}
+
+func TestProtocol_NetPipeTransport(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	done := make(chan struct{})
+
+	// Server goroutine: echo back received frames with OpPongResp
+	go func() {
+		defer close(done)
+		frame, err := protocol.ReadFrame(serverConn)
+		if err != nil {
+			t.Errorf("server ReadFrame error: %v", err)
+			return
+		}
+		if frame.OpCode != protocol.OpPingReq {
+			t.Errorf("expected OpPingReq, got %x", frame.OpCode)
+			return
+		}
+		if err := protocol.WriteFrame(serverConn, protocol.OpPongResp, frame.Payload); err != nil {
+			t.Errorf("server WriteFrame error: %v", err)
+			return
+		}
+	}()
+
+	payload := []byte("duplex-network-ping")
+	if err := protocol.WriteFrame(clientConn, protocol.OpPingReq, payload); err != nil {
+		t.Fatalf("client WriteFrame error: %v", err)
+	}
+
+	resp, err := protocol.ReadFrame(clientConn)
+	if err != nil {
+		t.Fatalf("client ReadFrame error: %v", err)
+	}
+	if resp.OpCode != protocol.OpPongResp || !bytes.Equal(resp.Payload, payload) {
+		t.Fatalf("unexpected pong response: %+v", resp)
+	}
+
+	<-done
+}
+
+func BenchmarkProtocol_EncodeFrame(b *testing.B) {
+	payload := bytes.Repeat([]byte{0x42}, 1024)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = protocol.EncodeFrame(protocol.OpProduceReq, payload)
+	}
+}
+
+func BenchmarkProtocol_ReadFrame(b *testing.B) {
+	payload := bytes.Repeat([]byte{0x42}, 1024)
+	raw := protocol.EncodeFrame(protocol.OpProduceReq, payload)
+	reader := bytes.NewReader(raw)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		reader.Reset(raw)
+		_, _ = protocol.ReadFrame(reader)
 	}
 }
