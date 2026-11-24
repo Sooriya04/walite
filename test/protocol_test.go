@@ -10,7 +10,7 @@ Functions Manifest & Usage:
 - TestProtocol_InvalidMagic(t *testing.T): Ensures frames with wrong magic bytes are rejected with ErrInvalidMagic.
 - TestProtocol_UnsupportedVersion(t *testing.T): Ensures unsupported protocol versions return ErrUnsupportedVersion.
 - TestProtocol_FrameTooLarge(t *testing.T): Verifies that frames exceeding 16MB are rejected with ErrFrameTooLarge.
-- TestProtocol_TruncatedFrame(t *testing.T): Asserts io.ErrUnexpectedEOF or ErrTruncatedFrame on severed connection streams.
+- TestProtocol_TruncatedFrame(t *testing.T): Asserts ErrTruncatedFrame on severed streams and io.EOF on clean disconnects.
 - TestProtocol_ProduceRoundtrip(t *testing.T): Verifies binary serialization and recovery of ProduceReq and ProduceResp.
 - TestProtocol_ConsumeRoundtrip(t *testing.T): Verifies binary serialization and recovery of ConsumeReq and ConsumeResp.
 - TestProtocol_OffsetRoundtrip(t *testing.T): Verifies binary serialization and recovery of OffsetReq and OffsetResp.
@@ -112,18 +112,59 @@ func TestProtocol_FrameTooLarge(t *testing.T) {
 }
 
 func TestProtocol_TruncatedFrame(t *testing.T) {
-	raw := protocol.EncodeFrame(protocol.OpProduceReq, []byte("full payload data here"))
-	// Truncate halfway through payload
-	truncated := raw[:len(raw)-5]
+	t.Run("TruncatedPayloadMidway", func(t *testing.T) {
+		raw := protocol.EncodeFrame(protocol.OpProduceReq, []byte("full payload data here"))
+		// Truncate halfway through payload (io.ErrUnexpectedEOF from io.ReadFull)
+		truncated := raw[:len(raw)-5]
 
-	buf := bytes.NewReader(truncated)
-	_, err := protocol.ReadFrame(buf)
-	if err == nil {
-		t.Fatalf("expected error reading truncated frame, got nil")
-	}
-	if !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, protocol.ErrTruncatedFrame) {
-		t.Fatalf("expected EOF error, got %v", err)
-	}
+		buf := bytes.NewReader(truncated)
+		_, err := protocol.ReadFrame(buf)
+		if err == nil {
+			t.Fatalf("expected error reading truncated frame, got nil")
+		}
+		if !errors.Is(err, protocol.ErrTruncatedFrame) {
+			t.Fatalf("expected ErrTruncatedFrame, got %v", err)
+		}
+	})
+
+	t.Run("TruncatedPayloadZeroBytes", func(t *testing.T) {
+		raw := protocol.EncodeFrame(protocol.OpProduceReq, []byte("full payload data here"))
+		// Truncate exactly after header, so 0 payload bytes are read (io.EOF from io.ReadFull)
+		truncated := raw[:protocol.HeaderSize]
+
+		buf := bytes.NewReader(truncated)
+		_, err := protocol.ReadFrame(buf)
+		if err == nil {
+			t.Fatalf("expected error reading truncated frame, got nil")
+		}
+		if !errors.Is(err, protocol.ErrTruncatedFrame) {
+			t.Fatalf("expected ErrTruncatedFrame, got %v", err)
+		}
+	})
+
+	t.Run("TruncatedHeaderMidway", func(t *testing.T) {
+		raw := protocol.EncodeFrame(protocol.OpProduceReq, []byte("full payload data here"))
+		// Truncate halfway through header (e.g. 3 bytes out of 8)
+		truncated := raw[:3]
+
+		buf := bytes.NewReader(truncated)
+		_, err := protocol.ReadFrame(buf)
+		if err == nil {
+			t.Fatalf("expected error reading truncated header, got nil")
+		}
+		if !errors.Is(err, protocol.ErrTruncatedFrame) {
+			t.Fatalf("expected ErrTruncatedFrame, got %v", err)
+		}
+	})
+
+	t.Run("CleanEOFOnHeader", func(t *testing.T) {
+		// Zero bytes in reader -> clean EOF
+		buf := bytes.NewReader(nil)
+		_, err := protocol.ReadFrame(buf)
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("expected io.EOF on clean stream close, got %v", err)
+		}
+	})
 }
 
 func TestProtocol_ProduceRoundtrip(t *testing.T) {

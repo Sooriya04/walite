@@ -116,6 +116,9 @@ func ReadFrame(r io.Reader) (Frame, error) {
 	defer headerPool.Put(headerPtr)
 
 	if _, err := io.ReadFull(r, header); err != nil {
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return Frame{}, ErrTruncatedFrame
+		}
 		return Frame{}, err
 	}
 
@@ -144,7 +147,7 @@ func ReadFrame(r io.Reader) (Frame, error) {
 
 	payload := make([]byte, payloadLen)
 	if _, err := io.ReadFull(r, payload); err != nil {
-		if errors.Is(err, io.EOF) {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return Frame{}, ErrTruncatedFrame
 		}
 		return Frame{}, err
