@@ -16,6 +16,7 @@ Functions Manifest & Usage:
 - TestServer_WriteTimeout_ClientStopsReading(t *testing.T): Asserts that unresponsive clients trigger WriteTimeout when failing to consume server responses.
 - TestServer_ZeroTimeoutDisablesDeadlines(t *testing.T): Verifies that zero-valued timeouts disable deadline enforcement.
 - TestServer_MultipleConsecutiveFramesRefreshDeadlines(t *testing.T): Verifies deadlines refresh on every frame over long-lived sessions.
+- TestServer_Shutdown_StatusErrServerClosed(t *testing.T): Asserts that produce, consume, offset-get, and offset-commit return StatusErrServerClosed during shutdown.
 */
 
 import (
@@ -524,4 +525,173 @@ func TestServer_MultipleConsecutiveFramesRefreshDeadlines(t *testing.T) {
 			t.Fatalf("frame %d: expected OpPongResp, got %x", i, resp.OpCode)
 		}
 	}
+}
+
+func TestServer_Shutdown_StatusErrServerClosed(t *testing.T) {
+	srv, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Provision a partition first so it exists
+	_, err := srv.getOrCreatePartition("orders", 0)
+	if err != nil {
+		t.Fatalf("setup partition failed: %v", err)
+	}
+
+	// Close the server
+	if err := srv.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	t.Run("ProduceReturnsStatusErrServerClosed", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		req := protocol.ProduceReq{
+			Topic:       "orders",
+			PartitionID: 0,
+			Records: []*log.Record{
+				{Value: []byte("v1")},
+			},
+		}
+		payload := protocol.EncodeProduceReq(req)
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- srv.handleProduce(serverConn, payload)
+		}()
+
+		respFrame, err := protocol.ReadFrame(clientConn)
+		if err != nil {
+			t.Fatalf("ReadFrame failed: %v", err)
+		}
+		if respFrame.OpCode != protocol.OpProduceResp {
+			t.Fatalf("expected OpProduceResp, got %x", respFrame.OpCode)
+		}
+
+		resp, err := protocol.DecodeProduceResp(respFrame.Payload)
+		if err != nil {
+			t.Fatalf("DecodeProduceResp failed: %v", err)
+		}
+		if resp.Status != protocol.StatusErrServerClosed {
+			t.Fatalf("expected StatusErrServerClosed (%x), got %x", protocol.StatusErrServerClosed, resp.Status)
+		}
+		if err := <-errCh; err != nil {
+			t.Fatalf("handleProduce returned error: %v", err)
+		}
+	})
+
+	t.Run("ConsumeReturnsStatusErrServerClosed", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		req := protocol.ConsumeReq{
+			Topic:       "orders",
+			PartitionID: 0,
+			Offset:      0,
+			MaxBytes:    1024,
+		}
+		payload := protocol.EncodeConsumeReq(req)
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- srv.handleConsume(serverConn, payload)
+		}()
+
+		respFrame, err := protocol.ReadFrame(clientConn)
+		if err != nil {
+			t.Fatalf("ReadFrame failed: %v", err)
+		}
+		if respFrame.OpCode != protocol.OpConsumeResp {
+			t.Fatalf("expected OpConsumeResp, got %x", respFrame.OpCode)
+		}
+
+		resp, err := protocol.DecodeConsumeResp(respFrame.Payload)
+		if err != nil {
+			t.Fatalf("DecodeConsumeResp failed: %v", err)
+		}
+		if resp.Status != protocol.StatusErrServerClosed {
+			t.Fatalf("expected StatusErrServerClosed (%x), got %x", protocol.StatusErrServerClosed, resp.Status)
+		}
+		if err := <-errCh; err != nil {
+			t.Fatalf("handleConsume returned error: %v", err)
+		}
+	})
+
+	t.Run("OffsetGetReturnsStatusErrServerClosed", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		req := protocol.OffsetReq{
+			GroupID:     "group-1",
+			Topic:       "orders",
+			PartitionID: 0,
+		}
+		payload := protocol.EncodeOffsetReq(req)
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- srv.handleOffsetGet(serverConn, payload)
+		}()
+
+		respFrame, err := protocol.ReadFrame(clientConn)
+		if err != nil {
+			t.Fatalf("ReadFrame failed: %v", err)
+		}
+		if respFrame.OpCode != protocol.OpOffsetResp {
+			t.Fatalf("expected OpOffsetResp, got %x", respFrame.OpCode)
+		}
+
+		resp, err := protocol.DecodeOffsetResp(respFrame.Payload)
+		if err != nil {
+			t.Fatalf("DecodeOffsetResp failed: %v", err)
+		}
+		if resp.Status != protocol.StatusErrServerClosed {
+			t.Fatalf("expected StatusErrServerClosed (%x), got %x", protocol.StatusErrServerClosed, resp.Status)
+		}
+		if err := <-errCh; err != nil {
+			t.Fatalf("handleOffsetGet returned error: %v", err)
+		}
+	})
+
+	t.Run("OffsetCommitReturnsStatusErrServerClosed", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		req := protocol.CommitReq{
+			GroupID:     "group-1",
+			Topic:       "orders",
+			PartitionID: 0,
+			Offset:      10,
+			Metadata:    "meta",
+		}
+		payload := protocol.EncodeCommitReq(req)
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- srv.handleOffsetCommit(serverConn, payload)
+		}()
+
+		respFrame, err := protocol.ReadFrame(clientConn)
+		if err != nil {
+			t.Fatalf("ReadFrame failed: %v", err)
+		}
+		if respFrame.OpCode != protocol.OpCommitResp {
+			t.Fatalf("expected OpCommitResp, got %x", respFrame.OpCode)
+		}
+
+		resp, err := protocol.DecodeCommitResp(respFrame.Payload)
+		if err != nil {
+			t.Fatalf("DecodeCommitResp failed: %v", err)
+		}
+		if resp.Status != protocol.StatusErrServerClosed {
+			t.Fatalf("expected StatusErrServerClosed (%x), got %x", protocol.StatusErrServerClosed, resp.Status)
+		}
+		if err := <-errCh; err != nil {
+			t.Fatalf("handleOffsetCommit returned error: %v", err)
+		}
+	})
 }

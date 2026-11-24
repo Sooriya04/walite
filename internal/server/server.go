@@ -323,8 +323,12 @@ func (s *Server) handleProduce(conn net.Conn, payload []byte) error {
 
 	part, err := s.getOrCreatePartition(req.Topic, req.PartitionID)
 	if err != nil {
+		status := protocol.StatusErrUnknown
+		if errors.Is(err, ErrServerClosed) || errors.Is(err, os.ErrClosed) {
+			status = protocol.StatusErrServerClosed
+		}
 		resp := protocol.EncodeProduceResp(protocol.ProduceResp{
-			Status: protocol.StatusErrUnknown,
+			Status: status,
 		})
 		return s.writeResponse(conn, protocol.OpProduceResp, resp)
 	}
@@ -344,8 +348,12 @@ func (s *Server) handleProduce(conn net.Conn, payload []byte) error {
 	for i, rec := range req.Records {
 		off, appendErr := part.Append(rec)
 		if appendErr != nil {
+			status := protocol.StatusErrUnknown
+			if errors.Is(appendErr, ErrServerClosed) || errors.Is(appendErr, os.ErrClosed) {
+				status = protocol.StatusErrServerClosed
+			}
 			resp := protocol.EncodeProduceResp(protocol.ProduceResp{
-				Status:     protocol.StatusErrUnknown,
+				Status:     status,
 				BaseOffset: baseOffset,
 				Count:      count,
 			})
@@ -380,8 +388,15 @@ func (s *Server) handleConsume(conn net.Conn, payload []byte) error {
 
 	part := s.getPartition(req.Topic, req.PartitionID)
 	if part == nil {
+		s.mu.RLock()
+		closed := s.closed
+		s.mu.RUnlock()
+		status := protocol.StatusErrPartitionNotFound
+		if closed {
+			status = protocol.StatusErrServerClosed
+		}
 		resp := protocol.EncodeConsumeResp(protocol.ConsumeResp{
-			Status: protocol.StatusErrPartitionNotFound,
+			Status: status,
 		})
 		return s.writeResponse(conn, protocol.OpConsumeResp, resp)
 	}
@@ -412,6 +427,12 @@ func (s *Server) handleConsume(conn net.Conn, payload []byte) error {
 	for currentOffset < nextOffset {
 		rec, readErr := part.ReadAt(currentOffset)
 		if readErr != nil {
+			if errors.Is(readErr, os.ErrClosed) || errors.Is(readErr, ErrServerClosed) {
+				resp := protocol.EncodeConsumeResp(protocol.ConsumeResp{
+					Status: protocol.StatusErrServerClosed,
+				})
+				return s.writeResponse(conn, protocol.OpConsumeResp, resp)
+			}
 			if errors.Is(readErr, log.ErrOffsetOutOfRange) || errors.Is(readErr, io.EOF) {
 				break
 			}
@@ -448,6 +469,16 @@ func (s *Server) handleOffsetGet(conn net.Conn, payload []byte) error {
 		return s.writeResponse(conn, protocol.OpOffsetResp, resp)
 	}
 
+	s.mu.RLock()
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
+		resp := protocol.EncodeOffsetResp(protocol.OffsetResp{
+			Status: protocol.StatusErrServerClosed,
+		})
+		return s.writeResponse(conn, protocol.OpOffsetResp, resp)
+	}
+
 	offset, getErr := s.offsetMgr.GetOffset(req.GroupID, req.Topic, req.PartitionID)
 	if getErr != nil {
 		if errors.Is(getErr, consumer.ErrOffsetNotFound) {
@@ -457,8 +488,12 @@ func (s *Server) handleOffsetGet(conn net.Conn, payload []byte) error {
 			})
 			return s.writeResponse(conn, protocol.OpOffsetResp, resp)
 		}
+		status := protocol.StatusErrUnknown
+		if errors.Is(getErr, os.ErrClosed) || errors.Is(getErr, ErrServerClosed) {
+			status = protocol.StatusErrServerClosed
+		}
 		resp := protocol.EncodeOffsetResp(protocol.OffsetResp{
-			Status: protocol.StatusErrUnknown,
+			Status: status,
 		})
 		return s.writeResponse(conn, protocol.OpOffsetResp, resp)
 	}
@@ -479,6 +514,16 @@ func (s *Server) handleOffsetCommit(conn net.Conn, payload []byte) error {
 		return s.writeResponse(conn, protocol.OpCommitResp, resp)
 	}
 
+	s.mu.RLock()
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
+		resp := protocol.EncodeCommitResp(protocol.CommitResp{
+			Status: protocol.StatusErrServerClosed,
+		})
+		return s.writeResponse(conn, protocol.OpCommitResp, resp)
+	}
+
 	cp := consumer.Checkpoint{
 		GroupID:     req.GroupID,
 		Topic:       req.Topic,
@@ -489,8 +534,12 @@ func (s *Server) handleOffsetCommit(conn net.Conn, payload []byte) error {
 	}
 
 	if commitErr := s.offsetMgr.CommitOffset(cp); commitErr != nil {
+		status := protocol.StatusErrUnknown
+		if errors.Is(commitErr, os.ErrClosed) || errors.Is(commitErr, ErrServerClosed) {
+			status = protocol.StatusErrServerClosed
+		}
 		resp := protocol.EncodeCommitResp(protocol.CommitResp{
-			Status: protocol.StatusErrUnknown,
+			Status: status,
 		})
 		return s.writeResponse(conn, protocol.OpCommitResp, resp)
 	}

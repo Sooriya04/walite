@@ -57,11 +57,12 @@
 
 ### Network Lifecycle & Protocol Hardening (Audit Fixes)
 - **Status:** COMPLETED
-- **Commits:** `6923fb8`, `fa91b64`, `33b1753`
+- **Commits:** `6923fb8`, `fa91b64`, `33b1753`, pending
 - **Deliverables:**
   - Bug 1 (Commit `6923fb8`): Track active client sockets in `Server.conns` with atomic shutdown coordination, closing sockets immediately on shutdown to prevent goroutine leaks and eliminate the 2s shutdown hang.
   - Bug 2 (Commit `fa91b64`): Enforce per-frame `conn.SetReadDeadline` and `writeResponse` `conn.SetWriteDeadline` in TCP worker goroutines to prevent Slowloris socket exhaustion.
   - Bug 3 (Commit `33b1753`): Map `io.ErrUnexpectedEOF` during header and payload reads in `protocol.ReadFrame` to `protocol.ErrTruncatedFrame`, preserving `io.EOF` for clean stream terminations.
+  - Bug 4: Return StatusErrServerClosed (0x0006) on produce, consume, offset-get, and offset-commit during server shutdown instead of generic StatusErrUnknown or StatusErrPartitionNotFound.
 
 ### Task 4.4: End-to-End Integration Smoke Test
 - **Status:** PENDING
