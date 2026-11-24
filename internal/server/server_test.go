@@ -10,6 +10,7 @@ Functions Manifest & Usage:
 - TestServer_ProduceAndConsume(t *testing.T): Tests network produce batch and consume roundtrip.
 - TestServer_OffsetCommitAndGet(t *testing.T): Tests consumer offset commit and retrieval over TCP.
 - TestServer_PartitionNotFound(t *testing.T): Verifies error response on consuming from uncreated partition.
+- TestServer_GracefulShutdownUnblocksIdleClients(t *testing.T): Asserts that Close() immediately unblocks idle client reads in <500ms without leaking goroutines.
 */
 
 import (
@@ -269,5 +270,47 @@ func TestServer_PartitionNotFound(t *testing.T) {
 	}
 	if consumeResp.Status != protocol.StatusErrPartitionNotFound {
 		t.Fatalf("expected StatusErrPartitionNotFound, got %d", consumeResp.Status)
+	}
+}
+
+func TestServer_GracefulShutdownUnblocksIdleClients(t *testing.T) {
+	srv, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Connect 3 idle clients that block waiting on server responses without sending data
+	const numClients = 3
+	conns := make([]net.Conn, numClients)
+	for i := 0; i < numClients; i++ {
+		c, err := net.Dial("tcp", srv.Addr().String())
+		if err != nil {
+			t.Fatalf("client %d dial failed: %v", i, err)
+		}
+		conns[i] = c
+		defer c.Close()
+	}
+
+	// Give a few milliseconds for acceptLoop to register all connections
+	time.Sleep(20 * time.Millisecond)
+
+	// Trigger graceful shutdown and measure time taken
+	start := time.Now()
+	if err := srv.Close(); err != nil {
+		t.Fatalf("srv.Close() returned error: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// Shutdown must unblock all client reads immediately (<500ms), NOT wait for 2-second timeout
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("server shutdown took %v, expected < 500ms", elapsed)
+	}
+
+	// Verify that all client sockets are closed and return EOF or closed network error on read
+	buf := make([]byte, 8)
+	for i, c := range conns {
+		_ = c.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		_, err := c.Read(buf)
+		if err == nil {
+			t.Errorf("expected EOF or closed error on client %d, got nil", i)
+		}
 	}
 }

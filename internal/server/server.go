@@ -46,6 +46,7 @@ type Server struct {
 	mu         sync.RWMutex
 	partitions map[string]map[uint32]*log.Partition
 	offsetMgr  *consumer.OffsetManager
+	conns      map[net.Conn]struct{}
 	closed     bool
 	wg         sync.WaitGroup
 	quit       chan struct{}
@@ -75,6 +76,7 @@ func NewServer(cfg Config) (*Server, error) {
 		cfg:        cfg,
 		partitions: make(map[string]map[uint32]*log.Partition),
 		offsetMgr:  om,
+		conns:      make(map[net.Conn]struct{}),
 		quit:       make(chan struct{}),
 	}, nil
 }
@@ -111,7 +113,7 @@ func (s *Server) Addr() net.Addr {
 	return s.listener.Addr()
 }
 
-// Close gracefully terminates the server, halting listeners, draining in-flight requests, and syncing storage.
+// Close gracefully terminates the server, halting listeners, closing client sockets, draining workers, and syncing storage.
 func (s *Server) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -126,7 +128,21 @@ func (s *Server) Close() error {
 		closeErr = s.listener.Close()
 	}
 
-	// Flush and close all active topic partitions
+	// Immediately close all active client network connections.
+	// This unblocks any blocked protocol.ReadFrame / io.ReadFull calls with net.ErrClosed,
+	// allowing all handleConn goroutines to cleanly exit without hanging.
+	for conn := range s.conns {
+		_ = conn.Close()
+	}
+	s.mu.Unlock()
+
+	// Wait for acceptLoop and all connection goroutines to fully exit.
+	// Since all sockets are closed and s.closed prevents any new s.wg.Add,
+	// all goroutines terminate within sub-milliseconds without WaitGroup races.
+	s.wg.Wait()
+
+	// Now that all client goroutines have completely exited, safely flush and close partitions and offset manager.
+	s.mu.Lock()
 	for _, parts := range s.partitions {
 		for _, part := range parts {
 			_ = part.Sync()
@@ -139,18 +155,6 @@ func (s *Server) Close() error {
 		_ = s.offsetMgr.Close()
 	}
 	s.mu.Unlock()
-
-	// Wait with a 2-second timeout for connection routines to drain
-	drainDone := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(drainDone)
-	}()
-
-	select {
-	case <-drainDone:
-	case <-time.After(2 * time.Second):
-	}
 
 	return closeErr
 }
@@ -171,7 +175,16 @@ func (s *Server) acceptLoop() {
 			continue
 		}
 
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
+		s.conns[conn] = struct{}{}
 		s.wg.Add(1)
+		s.mu.Unlock()
+
 		go s.handleConn(conn)
 	}
 }
@@ -179,6 +192,9 @@ func (s *Server) acceptLoop() {
 func (s *Server) handleConn(conn net.Conn) {
 	defer func() {
 		_ = conn.Close()
+		s.mu.Lock()
+		delete(s.conns, conn)
+		s.mu.Unlock()
 		s.wg.Done()
 	}()
 
