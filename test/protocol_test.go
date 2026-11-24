@@ -15,6 +15,7 @@ Functions Manifest & Usage:
 - TestProtocol_ConsumeRoundtrip(t *testing.T): Verifies binary serialization and recovery of ConsumeReq and ConsumeResp.
 - TestProtocol_OffsetRoundtrip(t *testing.T): Verifies binary serialization and recovery of OffsetReq and OffsetResp.
 - TestProtocol_CommitRoundtrip(t *testing.T): Verifies binary serialization and recovery of CommitReq and CommitResp.
+- TestProtocol_OversizedStringClamping(t *testing.T): Asserts that strings exceeding 65,535 bytes are clamped without 16-bit integer overflow.
 - TestProtocol_PingPongRoundtrip(t *testing.T): Verifies heartbeat echo serialization.
 - TestProtocol_MalformedPayloads(t *testing.T): Tests bounds checks and error handling for malformed/truncated payloads.
 - TestProtocol_NetPipeTransport(t *testing.T): Validates duplex stream communication over a simulated network connection.
@@ -29,6 +30,7 @@ import (
 	"io"
 	"net"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -317,6 +319,100 @@ func TestProtocol_CommitRoundtrip(t *testing.T) {
 	if !reflect.DeepEqual(resp, decodedResp) {
 		t.Fatalf("commit resp mismatch")
 	}
+}
+
+func TestProtocol_OversizedStringClamping(t *testing.T) {
+	hugeString := strings.Repeat("A", 70000)
+
+	t.Run("CommitReq_MetadataClamped", func(t *testing.T) {
+		req := protocol.CommitReq{
+			GroupID:     "group",
+			Topic:       "topic",
+			PartitionID: 0,
+			Offset:      100,
+			Metadata:    hugeString,
+		}
+		encoded := protocol.EncodeCommitReq(req)
+		decoded, err := protocol.DecodeCommitReq(encoded)
+		if err != nil {
+			t.Fatalf("DecodeCommitReq failed: %v", err)
+		}
+		if len(decoded.Metadata) != 65535 {
+			t.Fatalf("expected Metadata len 65535, got %d", len(decoded.Metadata))
+		}
+		if decoded.Metadata != hugeString[:65535] {
+			t.Fatalf("metadata content mismatch")
+		}
+	})
+
+	t.Run("CommitReq_GroupIDClamped", func(t *testing.T) {
+		req := protocol.CommitReq{
+			GroupID:     hugeString,
+			Topic:       "topic",
+			PartitionID: 0,
+			Offset:      100,
+			Metadata:    "meta",
+		}
+		encoded := protocol.EncodeCommitReq(req)
+		decoded, err := protocol.DecodeCommitReq(encoded)
+		if err != nil {
+			t.Fatalf("DecodeCommitReq failed: %v", err)
+		}
+		if len(decoded.GroupID) != 65535 {
+			t.Fatalf("expected GroupID len 65535, got %d", len(decoded.GroupID))
+		}
+	})
+
+	t.Run("ProduceReq_TopicClamped", func(t *testing.T) {
+		req := protocol.ProduceReq{
+			Topic:       hugeString,
+			PartitionID: 0,
+			Records: []*log.Record{
+				{Value: []byte("val")},
+			},
+		}
+		encoded := protocol.EncodeProduceReq(req)
+		decoded, err := protocol.DecodeProduceReq(encoded)
+		if err != nil {
+			t.Fatalf("DecodeProduceReq failed: %v", err)
+		}
+		if len(decoded.Topic) != 65535 {
+			t.Fatalf("expected Topic len 65535, got %d", len(decoded.Topic))
+		}
+	})
+
+	t.Run("ConsumeReq_TopicClamped", func(t *testing.T) {
+		req := protocol.ConsumeReq{
+			Topic:       hugeString,
+			PartitionID: 0,
+			Offset:      0,
+			MaxBytes:    1024,
+		}
+		encoded := protocol.EncodeConsumeReq(req)
+		decoded, err := protocol.DecodeConsumeReq(encoded)
+		if err != nil {
+			t.Fatalf("DecodeConsumeReq failed: %v", err)
+		}
+		if len(decoded.Topic) != 65535 {
+			t.Fatalf("expected Topic len 65535, got %d", len(decoded.Topic))
+		}
+	})
+
+	t.Run("OffsetReq_TopicClamped", func(t *testing.T) {
+		req := protocol.OffsetReq{
+			GroupID:     "group",
+			Topic:       hugeString,
+			PartitionID: 0,
+		}
+		encoded := protocol.EncodeOffsetReq(req)
+		decoded, err := protocol.DecodeOffsetReq(encoded)
+		if err != nil {
+			t.Fatalf("DecodeOffsetReq failed: %v", err)
+		}
+		if len(decoded.Topic) != 65535 {
+			t.Fatalf("expected Topic len 65535, got %d", len(decoded.Topic))
+		}
+	})
 }
 
 func TestProtocol_PingPongRoundtrip(t *testing.T) {

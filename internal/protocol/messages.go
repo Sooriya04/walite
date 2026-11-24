@@ -99,9 +99,19 @@ type PongResp struct {
 	Echo []byte
 }
 
+// maxStringBytes defines the 16-bit ceiling (65,535 bytes) for wire-encoded string fields.
+const maxStringBytes = 65535
+
+func clampBytes(b []byte) []byte {
+	if len(b) > maxStringBytes {
+		return b[:maxStringBytes]
+	}
+	return b
+}
+
 // EncodeProduceReq serializes a ProduceReq into a binary payload.
 func EncodeProduceReq(req ProduceReq) []byte {
-	topicBytes := []byte(req.Topic)
+	topicBytes := clampBytes([]byte(req.Topic))
 	totalRecBytes := 0
 	for _, r := range req.Records {
 		totalRecBytes += log.HeaderSize + len(r.Key) + len(r.Value)
@@ -193,7 +203,7 @@ func DecodeProduceResp(data []byte) (ProduceResp, error) {
 
 // EncodeConsumeReq serializes a ConsumeReq into a binary payload.
 func EncodeConsumeReq(req ConsumeReq) []byte {
-	topicBytes := []byte(req.Topic)
+	topicBytes := clampBytes([]byte(req.Topic))
 	totalLen := 2 + len(topicBytes) + 4 + 8 + 4
 	buf := make([]byte, totalLen)
 
@@ -296,8 +306,8 @@ func DecodeConsumeResp(data []byte) (ConsumeResp, error) {
 
 // EncodeOffsetReq serializes an OffsetReq into a binary payload.
 func EncodeOffsetReq(req OffsetReq) []byte {
-	groupBytes := []byte(req.GroupID)
-	topicBytes := []byte(req.Topic)
+	groupBytes := clampBytes([]byte(req.GroupID))
+	topicBytes := clampBytes([]byte(req.Topic))
 
 	totalLen := 2 + len(groupBytes) + 2 + len(topicBytes) + 4
 	buf := make([]byte, totalLen)
@@ -367,9 +377,9 @@ func DecodeOffsetResp(data []byte) (OffsetResp, error) {
 
 // EncodeCommitReq serializes a CommitReq into a binary payload.
 func EncodeCommitReq(req CommitReq) []byte {
-	groupBytes := []byte(req.GroupID)
-	topicBytes := []byte(req.Topic)
-	metaBytes := []byte(req.Metadata)
+	groupBytes := clampBytes([]byte(req.GroupID))
+	topicBytes := clampBytes([]byte(req.Topic))
+	metaBytes := clampBytes([]byte(req.Metadata))
 
 	totalLen := 2 + len(groupBytes) + 2 + len(topicBytes) + 4 + 8 + 2 + len(metaBytes)
 	buf := make([]byte, totalLen)
