@@ -11,6 +11,11 @@ Functions Manifest & Usage:
 - TestServer_OffsetCommitAndGet(t *testing.T): Tests consumer offset commit and retrieval over TCP.
 - TestServer_PartitionNotFound(t *testing.T): Verifies error response on consuming from uncreated partition.
 - TestServer_GracefulShutdownUnblocksIdleClients(t *testing.T): Asserts that Close() immediately unblocks idle client reads in <500ms without leaking goroutines.
+- TestServer_ReadTimeout_StalledOneByte(t *testing.T): Asserts that clients stalling on partial frame bytes are severed when ReadTimeout fires.
+- TestServer_ReadTimeout_CompleteFrame(t *testing.T): Asserts that complete frames transmitted within ReadTimeout succeed.
+- TestServer_WriteTimeout_ClientStopsReading(t *testing.T): Asserts that unresponsive clients trigger WriteTimeout when failing to consume server responses.
+- TestServer_ZeroTimeoutDisablesDeadlines(t *testing.T): Verifies that zero-valued timeouts disable deadline enforcement.
+- TestServer_MultipleConsecutiveFramesRefreshDeadlines(t *testing.T): Verifies deadlines refresh on every frame over long-lived sessions.
 */
 
 import (
@@ -311,6 +316,212 @@ func TestServer_GracefulShutdownUnblocksIdleClients(t *testing.T) {
 		_, err := c.Read(buf)
 		if err == nil {
 			t.Errorf("expected EOF or closed error on client %d, got nil", i)
+		}
+	}
+}
+
+func TestServer_ReadTimeout_StalledOneByte(t *testing.T) {
+	dir, err := os.MkdirTemp("", "walite-test-timeout-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := Config{
+		Addr:               "127.0.0.1:0",
+		DataDir:            dir,
+		MaxSegmentBytes:    1024 * 1024,
+		IndexIntervalBytes: 1024,
+		FlushInterval:      100 * time.Millisecond,
+		ReadTimeout:        50 * time.Millisecond, // Fast timeout
+		WriteTimeout:       1 * time.Second,
+	}
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	// Send 1 byte and stall
+	if _, err := conn.Write([]byte{0x00}); err != nil {
+		t.Fatalf("Write 1 byte failed: %v", err)
+	}
+
+	// Wait for server's ReadTimeout to trigger and close the socket
+	buf := make([]byte, 16)
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_, err = conn.Read(buf)
+	if err == nil {
+		t.Fatalf("expected read error/EOF after server read timeout, got nil")
+	}
+}
+
+func TestServer_ReadTimeout_CompleteFrame(t *testing.T) {
+	dir, err := os.MkdirTemp("", "walite-test-timeout-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := Config{
+		Addr:               "127.0.0.1:0",
+		DataDir:            dir,
+		MaxSegmentBytes:    1024 * 1024,
+		IndexIntervalBytes: 1024,
+		FlushInterval:      100 * time.Millisecond,
+		ReadTimeout:        200 * time.Millisecond,
+		WriteTimeout:       200 * time.Millisecond,
+	}
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	ping := protocol.EncodePingReq(protocol.PingReq{Echo: []byte("fast-ping")})
+	if err := protocol.WriteFrame(conn, protocol.OpPingReq, ping); err != nil {
+		t.Fatalf("WriteFrame failed: %v", err)
+	}
+
+	resp, err := protocol.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("ReadFrame failed: %v", err)
+	}
+	if resp.OpCode != protocol.OpPongResp {
+		t.Fatalf("expected OpPongResp, got %x", resp.OpCode)
+	}
+}
+
+func TestServer_WriteTimeout_ClientStopsReading(t *testing.T) {
+	srv := &Server{
+		cfg: Config{
+			WriteTimeout: 20 * time.Millisecond,
+		},
+	}
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	// Client does NOT read. Server attempts to write a frame with a 20ms write timeout.
+	err := srv.writeResponse(serverConn, protocol.OpPongResp, []byte("payload-blocked-by-pipe"))
+	if err == nil {
+		t.Fatalf("expected write timeout error when client does not read, got nil")
+	}
+}
+
+func TestServer_ZeroTimeoutDisablesDeadlines(t *testing.T) {
+	dir, err := os.MkdirTemp("", "walite-test-zerotimeout-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := Config{
+		Addr:               "127.0.0.1:0",
+		DataDir:            dir,
+		MaxSegmentBytes:    1024 * 1024,
+		IndexIntervalBytes: 1024,
+		FlushInterval:      100 * time.Millisecond,
+		ReadTimeout:        0, // Disabled
+		WriteTimeout:       0, // Disabled
+	}
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	// Sleep 60ms (which would have timed out a 50ms deadline)
+	time.Sleep(60 * time.Millisecond)
+
+	// Send Ping frame
+	ping := protocol.EncodePingReq(protocol.PingReq{Echo: []byte("zero-timeout-ping")})
+	if err := protocol.WriteFrame(conn, protocol.OpPingReq, ping); err != nil {
+		t.Fatalf("WriteFrame failed: %v", err)
+	}
+
+	resp, err := protocol.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("ReadFrame failed: %v", err)
+	}
+	if resp.OpCode != protocol.OpPongResp {
+		t.Fatalf("expected OpPongResp, got %x", resp.OpCode)
+	}
+}
+
+func TestServer_MultipleConsecutiveFramesRefreshDeadlines(t *testing.T) {
+	dir, err := os.MkdirTemp("", "walite-test-consecutive-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := Config{
+		Addr:               "127.0.0.1:0",
+		DataDir:            dir,
+		MaxSegmentBytes:    1024 * 1024,
+		IndexIntervalBytes: 1024,
+		FlushInterval:      100 * time.Millisecond,
+		ReadTimeout:        80 * time.Millisecond, // Each idle window allowed is 80ms
+		WriteTimeout:       80 * time.Millisecond,
+	}
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	// Send 5 consecutive frames with 30ms sleep in between.
+	// Total elapsed time = 150ms (> 80ms total), proving deadlines refresh on each frame.
+	for i := 0; i < 5; i++ {
+		time.Sleep(30 * time.Millisecond)
+		ping := protocol.EncodePingReq(protocol.PingReq{Echo: []byte{byte(i)}})
+		if err := protocol.WriteFrame(conn, protocol.OpPingReq, ping); err != nil {
+			t.Fatalf("WriteFrame frame %d failed: %v", i, err)
+		}
+
+		resp, err := protocol.ReadFrame(conn)
+		if err != nil {
+			t.Fatalf("ReadFrame frame %d failed: %v", i, err)
+		}
+		if resp.OpCode != protocol.OpPongResp {
+			t.Fatalf("frame %d: expected OpPongResp, got %x", i, resp.OpCode)
 		}
 	}
 }

@@ -14,6 +14,7 @@ Functions Manifest & Usage:
 - (s *Server) handleConn(conn net.Conn): Handles stream protocol framing for a single client connection.
 - (s *Server) getOrCreatePartition(topic string, partitionID uint32) (*log.Partition, error): Thread-safely fetches or creates a partition.
 - (s *Server) getPartition(topic string, partitionID uint32) *log.Partition: Thread-safely reads existing partition without creating.
+- (s *Server) writeResponse(conn net.Conn, opCode uint8, payload []byte) error: Sets write deadline and writes framed response.
 - (s *Server) handleProduce(conn net.Conn, payload []byte) error: Appends batch of records to specified partition.
 - (s *Server) handleConsume(conn net.Conn, payload []byte) error: Reads sequential records starting at offset up to max bytes.
 - (s *Server) handleOffsetGet(conn net.Conn, payload []byte) error: Queries consumer group checkpoint offset.
@@ -205,6 +206,12 @@ func (s *Server) handleConn(conn net.Conn) {
 		default:
 		}
 
+		if s.cfg.ReadTimeout > 0 {
+			if err := conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout)); err != nil {
+				return
+			}
+		}
+
 		frame, err := protocol.ReadFrame(conn)
 		if err != nil {
 			return
@@ -223,7 +230,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		case protocol.OpPingReq:
 			handleErr = s.handlePing(conn, frame.Payload)
 		default:
-			handleErr = protocol.WriteFrame(conn, protocol.OpProduceResp, protocol.EncodeProduceResp(protocol.ProduceResp{
+			handleErr = s.writeResponse(conn, protocol.OpProduceResp, protocol.EncodeProduceResp(protocol.ProduceResp{
 				Status: protocol.StatusErrUnknown,
 			}))
 		}
@@ -295,13 +302,23 @@ func (s *Server) getPartition(topic string, partitionID uint32) *log.Partition {
 	return nil
 }
 
+
+func (s *Server) writeResponse(conn net.Conn, opCode uint8, payload []byte) error {
+	if s.cfg.WriteTimeout > 0 {
+		if err := conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout)); err != nil {
+			return err
+		}
+	}
+	return protocol.WriteFrame(conn, opCode, payload)
+}
+
 func (s *Server) handleProduce(conn net.Conn, payload []byte) error {
 	req, err := protocol.DecodeProduceReq(payload)
 	if err != nil {
 		resp := protocol.EncodeProduceResp(protocol.ProduceResp{
 			Status: protocol.StatusErrInvalidPayload,
 		})
-		return protocol.WriteFrame(conn, protocol.OpProduceResp, resp)
+		return s.writeResponse(conn, protocol.OpProduceResp, resp)
 	}
 
 	part, err := s.getOrCreatePartition(req.Topic, req.PartitionID)
@@ -309,7 +326,7 @@ func (s *Server) handleProduce(conn net.Conn, payload []byte) error {
 		resp := protocol.EncodeProduceResp(protocol.ProduceResp{
 			Status: protocol.StatusErrUnknown,
 		})
-		return protocol.WriteFrame(conn, protocol.OpProduceResp, resp)
+		return s.writeResponse(conn, protocol.OpProduceResp, resp)
 	}
 
 	if len(req.Records) == 0 {
@@ -318,7 +335,7 @@ func (s *Server) handleProduce(conn net.Conn, payload []byte) error {
 			BaseOffset: part.NextOffset(),
 			Count:      0,
 		})
-		return protocol.WriteFrame(conn, protocol.OpProduceResp, resp)
+		return s.writeResponse(conn, protocol.OpProduceResp, resp)
 	}
 
 	var baseOffset uint64
@@ -332,7 +349,7 @@ func (s *Server) handleProduce(conn net.Conn, payload []byte) error {
 				BaseOffset: baseOffset,
 				Count:      count,
 			})
-			return protocol.WriteFrame(conn, protocol.OpProduceResp, resp)
+			return s.writeResponse(conn, protocol.OpProduceResp, resp)
 		}
 		if i == 0 {
 			baseOffset = off
@@ -349,7 +366,7 @@ func (s *Server) handleProduce(conn net.Conn, payload []byte) error {
 		BaseOffset: baseOffset,
 		Count:      count,
 	})
-	return protocol.WriteFrame(conn, protocol.OpProduceResp, resp)
+	return s.writeResponse(conn, protocol.OpProduceResp, resp)
 }
 
 func (s *Server) handleConsume(conn net.Conn, payload []byte) error {
@@ -358,7 +375,7 @@ func (s *Server) handleConsume(conn net.Conn, payload []byte) error {
 		resp := protocol.EncodeConsumeResp(protocol.ConsumeResp{
 			Status: protocol.StatusErrInvalidPayload,
 		})
-		return protocol.WriteFrame(conn, protocol.OpConsumeResp, resp)
+		return s.writeResponse(conn, protocol.OpConsumeResp, resp)
 	}
 
 	part := s.getPartition(req.Topic, req.PartitionID)
@@ -366,7 +383,7 @@ func (s *Server) handleConsume(conn net.Conn, payload []byte) error {
 		resp := protocol.EncodeConsumeResp(protocol.ConsumeResp{
 			Status: protocol.StatusErrPartitionNotFound,
 		})
-		return protocol.WriteFrame(conn, protocol.OpConsumeResp, resp)
+		return s.writeResponse(conn, protocol.OpConsumeResp, resp)
 	}
 
 	nextOffset := part.NextOffset()
@@ -376,7 +393,7 @@ func (s *Server) handleConsume(conn net.Conn, payload []byte) error {
 		resp := protocol.EncodeConsumeResp(protocol.ConsumeResp{
 			Status: protocol.StatusErrOffsetOutOfRange,
 		})
-		return protocol.WriteFrame(conn, protocol.OpConsumeResp, resp)
+		return s.writeResponse(conn, protocol.OpConsumeResp, resp)
 	}
 
 	if req.Offset == nextOffset {
@@ -385,7 +402,7 @@ func (s *Server) handleConsume(conn net.Conn, payload []byte) error {
 			Status:  protocol.StatusOK,
 			Records: nil,
 		})
-		return protocol.WriteFrame(conn, protocol.OpConsumeResp, resp)
+		return s.writeResponse(conn, protocol.OpConsumeResp, resp)
 	}
 
 	var records []*log.Record
@@ -419,7 +436,7 @@ func (s *Server) handleConsume(conn net.Conn, payload []byte) error {
 		Status:  protocol.StatusOK,
 		Records: records,
 	})
-	return protocol.WriteFrame(conn, protocol.OpConsumeResp, resp)
+	return s.writeResponse(conn, protocol.OpConsumeResp, resp)
 }
 
 func (s *Server) handleOffsetGet(conn net.Conn, payload []byte) error {
@@ -428,7 +445,7 @@ func (s *Server) handleOffsetGet(conn net.Conn, payload []byte) error {
 		resp := protocol.EncodeOffsetResp(protocol.OffsetResp{
 			Status: protocol.StatusErrInvalidPayload,
 		})
-		return protocol.WriteFrame(conn, protocol.OpOffsetResp, resp)
+		return s.writeResponse(conn, protocol.OpOffsetResp, resp)
 	}
 
 	offset, getErr := s.offsetMgr.GetOffset(req.GroupID, req.Topic, req.PartitionID)
@@ -438,19 +455,19 @@ func (s *Server) handleOffsetGet(conn net.Conn, payload []byte) error {
 				Status: protocol.StatusErrOffsetOutOfRange,
 				Offset: 0,
 			})
-			return protocol.WriteFrame(conn, protocol.OpOffsetResp, resp)
+			return s.writeResponse(conn, protocol.OpOffsetResp, resp)
 		}
 		resp := protocol.EncodeOffsetResp(protocol.OffsetResp{
 			Status: protocol.StatusErrUnknown,
 		})
-		return protocol.WriteFrame(conn, protocol.OpOffsetResp, resp)
+		return s.writeResponse(conn, protocol.OpOffsetResp, resp)
 	}
 
 	resp := protocol.EncodeOffsetResp(protocol.OffsetResp{
 		Status: protocol.StatusOK,
 		Offset: offset,
 	})
-	return protocol.WriteFrame(conn, protocol.OpOffsetResp, resp)
+	return s.writeResponse(conn, protocol.OpOffsetResp, resp)
 }
 
 func (s *Server) handleOffsetCommit(conn net.Conn, payload []byte) error {
@@ -459,7 +476,7 @@ func (s *Server) handleOffsetCommit(conn net.Conn, payload []byte) error {
 		resp := protocol.EncodeCommitResp(protocol.CommitResp{
 			Status: protocol.StatusErrInvalidPayload,
 		})
-		return protocol.WriteFrame(conn, protocol.OpCommitResp, resp)
+		return s.writeResponse(conn, protocol.OpCommitResp, resp)
 	}
 
 	cp := consumer.Checkpoint{
@@ -475,23 +492,23 @@ func (s *Server) handleOffsetCommit(conn net.Conn, payload []byte) error {
 		resp := protocol.EncodeCommitResp(protocol.CommitResp{
 			Status: protocol.StatusErrUnknown,
 		})
-		return protocol.WriteFrame(conn, protocol.OpCommitResp, resp)
+		return s.writeResponse(conn, protocol.OpCommitResp, resp)
 	}
 
 	resp := protocol.EncodeCommitResp(protocol.CommitResp{
 		Status: protocol.StatusOK,
 	})
-	return protocol.WriteFrame(conn, protocol.OpCommitResp, resp)
+	return s.writeResponse(conn, protocol.OpCommitResp, resp)
 }
 
 func (s *Server) handlePing(conn net.Conn, payload []byte) error {
 	req, err := protocol.DecodePingReq(payload)
 	if err != nil {
-		return protocol.WriteFrame(conn, protocol.OpPongResp, nil)
+		return s.writeResponse(conn, protocol.OpPongResp, nil)
 	}
 
 	resp := protocol.EncodePongResp(protocol.PongResp{
 		Echo: req.Echo,
 	})
-	return protocol.WriteFrame(conn, protocol.OpPongResp, resp)
+	return s.writeResponse(conn, protocol.OpPongResp, resp)
 }
