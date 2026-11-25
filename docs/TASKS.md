@@ -66,13 +66,18 @@
   - Bug 5: Clamp string field lengths to 65,535 bytes in message serialization to prevent 16-bit integer overflow and frame payload corruption.
 
 ### Task 4.4: End-to-End Integration Smoke Test
-- **Status:** PENDING
+- **Status:** COMPLETED
 - **Deliverables:**
   - `test/smoke_test.go`:
     - Boots `walited` on an ephemeral TCP port (`127.0.0.1:0`).
     - Produces batches concurrently, consumes back, and validates offsets and CRC integrity.
     - Commits consumer group offsets, disconnects, reconnects, and asserts seamless cursor resumption.
     - Triggers graceful shutdown and asserts zero torn writes.
+    - Asserts partition storage format integrity directly on disk with engine bypass.
+    - Asserts active `.log` tail torn-write recovery, automatic tail truncation, and seamless append resumption.
+  - `internal/server/server.go`:
+    - Recovers and mounts pre-existing disk partitions on daemon boot.
+    - Transparently falls back to on-disk partition hydration in `getPartition`.
 
 ---
 

@@ -73,13 +73,43 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to open offset manager: %w", err)
 	}
 
-	return &Server{
+	srv := &Server{
 		cfg:        cfg,
 		partitions: make(map[string]map[uint32]*log.Partition),
 		offsetMgr:  om,
 		conns:      make(map[net.Conn]struct{}),
 		quit:       make(chan struct{}),
-	}, nil
+	}
+
+	// Discover and open existing topic partitions on disk
+	topicsDir := filepath.Join(cfg.DataDir, "topics")
+	if topicEntries, err := os.ReadDir(topicsDir); err == nil {
+		for _, topicEntry := range topicEntries {
+			if !topicEntry.IsDir() {
+				continue
+			}
+			topicName := topicEntry.Name()
+			topicPath := filepath.Join(topicsDir, topicName)
+			partEntries, err := os.ReadDir(topicPath)
+			if err != nil {
+				continue
+			}
+			for _, partEntry := range partEntries {
+				if !partEntry.IsDir() {
+					continue
+				}
+				var partID uint32
+				if n, _ := fmt.Sscanf(partEntry.Name(), "partition-%d", &partID); n == 1 {
+					if _, err := srv.getOrCreatePartition(topicName, partID); err != nil {
+						_ = srv.Close()
+						return nil, fmt.Errorf("failed to recover partition %s-%d: %w", topicName, partID, err)
+					}
+				}
+			}
+		}
+	}
+
+	return srv, nil
 }
 
 // Start binds to the configured TCP address and starts accepting incoming client connections.
@@ -291,13 +321,24 @@ func (s *Server) getOrCreatePartition(topic string, partitionID uint32) (*log.Pa
 
 func (s *Server) getPartition(topic string, partitionID uint32) *log.Partition {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	if s.closed {
+		s.mu.RUnlock()
 		return nil
 	}
 	if parts, ok := s.partitions[topic]; ok {
-		return parts[partitionID]
+		if p, exists := parts[partitionID]; exists {
+			s.mu.RUnlock()
+			return p
+		}
+	}
+	s.mu.RUnlock()
+
+	partDir := filepath.Join(s.cfg.DataDir, "topics", topic, fmt.Sprintf("partition-%d", partitionID))
+	if info, err := os.Stat(partDir); err == nil && info.IsDir() {
+		p, err := s.getOrCreatePartition(topic, partitionID)
+		if err == nil {
+			return p
+		}
 	}
 	return nil
 }
