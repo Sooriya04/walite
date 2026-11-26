@@ -18,6 +18,7 @@ Functions Manifest & Usage:
 - TestProtocol_OversizedStringClamping(t *testing.T): Asserts that strings exceeding 65,535 bytes are clamped without 16-bit integer overflow.
 - TestProtocol_PingPongRoundtrip(t *testing.T): Verifies heartbeat echo serialization.
 - TestProtocol_MalformedPayloads(t *testing.T): Tests bounds checks and error handling for malformed/truncated payloads.
+- TestProtocol_NumRecordsOverflowAndAllocationGuards(t *testing.T): Asserts that malformed or integer-overflowing record counts in ProduceReq and ConsumeResp are rejected with ErrMalformedPayload without allocating memory.
 - TestProtocol_NetPipeTransport(t *testing.T): Validates duplex stream communication over a simulated network connection.
 - BenchmarkProtocol_EncodeFrame(b *testing.B): Measures framing serialization latency and heap allocations.
 - BenchmarkProtocol_ReadFrame(b *testing.B): Measures framing deserialization latency and heap allocations.
@@ -463,6 +464,34 @@ func TestProtocol_MalformedPayloads(t *testing.T) {
 	}
 	if _, err := protocol.DecodeCommitResp(nil); !errors.Is(err, protocol.ErrMalformedPayload) {
 		t.Fatalf("expected ErrMalformedPayload for empty commit resp, got %v", err)
+	}
+}
+
+func TestProtocol_NumRecordsOverflowAndAllocationGuards(t *testing.T) {
+	// Construct a ProduceReq payload with valid topic, partition, but oversized / overflow numRecords
+	topic := "events"
+	payload := make([]byte, 2+len(topic)+4+4)
+	binary.BigEndian.PutUint16(payload[0:2], uint16(len(topic)))
+	copy(payload[2:2+len(topic)], topic)
+	pos := 2 + len(topic)
+	binary.BigEndian.PutUint32(payload[pos:pos+4], 0) // partitionID
+	pos += 4
+
+	for _, invalidCount := range []uint32{0xFFFFFFFF, 0x7FFFFFFF, 153391689, 500000, 1} {
+		binary.BigEndian.PutUint32(payload[pos:pos+4], invalidCount)
+		if _, err := protocol.DecodeProduceReq(payload); !errors.Is(err, protocol.ErrMalformedPayload) {
+			t.Fatalf("expected ErrMalformedPayload for invalid numRecords %d, got %v", invalidCount, err)
+		}
+	}
+
+	// Construct a ConsumeResp payload with StatusOK but oversized / overflow numRecords
+	respPayload := make([]byte, 2+4)
+	binary.BigEndian.PutUint16(respPayload[0:2], protocol.StatusOK)
+	for _, invalidCount := range []uint32{0xFFFFFFFF, 0x7FFFFFFF, 153391689, 500000, 1} {
+		binary.BigEndian.PutUint32(respPayload[2:6], invalidCount)
+		if _, err := protocol.DecodeConsumeResp(respPayload); !errors.Is(err, protocol.ErrMalformedPayload) {
+			t.Fatalf("expected ErrMalformedPayload for invalid numRecords %d, got %v", invalidCount, err)
+		}
 	}
 }
 

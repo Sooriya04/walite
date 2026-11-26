@@ -156,12 +156,16 @@ func DecodeProduceReq(data []byte) (ProduceReq, error) {
 	partitionID := binary.BigEndian.Uint32(data[pos : pos+4])
 	pos += 4
 
-	numRecords := int(binary.BigEndian.Uint32(data[pos : pos+4]))
+	numRecordsRaw := binary.BigEndian.Uint32(data[pos : pos+4])
 	pos += 4
 
-	if pos+numRecords*log.HeaderSize > len(data) {
+	// Guard against integer overflow and unvetted memory pre-allocation.
+	// Each record requires at least log.HeaderSize (28 bytes).
+	maxPossibleRecords := uint32((len(data) - pos) / log.HeaderSize)
+	if numRecordsRaw > maxPossibleRecords {
 		return ProduceReq{}, ErrMalformedPayload
 	}
+	numRecords := int(numRecordsRaw)
 
 	records := make([]*log.Record, 0, numRecords)
 	for i := 0; i < numRecords; i++ {
@@ -281,12 +285,16 @@ func DecodeConsumeResp(data []byte) (ConsumeResp, error) {
 	}
 
 	status := binary.BigEndian.Uint16(data[0:2])
-	numRecords := int(binary.BigEndian.Uint32(data[2:6]))
+	numRecordsRaw := binary.BigEndian.Uint32(data[2:6])
 	pos := 6
 
-	if pos+numRecords*log.HeaderSize > len(data) {
+	// Guard against integer overflow and unvetted memory pre-allocation.
+	// Each record requires at least log.HeaderSize (28 bytes).
+	maxPossibleRecords := uint32((len(data) - pos) / log.HeaderSize)
+	if numRecordsRaw > maxPossibleRecords {
 		return ConsumeResp{}, ErrMalformedPayload
 	}
+	numRecords := int(numRecordsRaw)
 
 	records := make([]*log.Record, 0, numRecords)
 	for i := 0; i < numRecords; i++ {
