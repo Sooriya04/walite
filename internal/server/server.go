@@ -15,6 +15,7 @@ Functions Manifest & Usage:
 - (s *Server) handleConn(conn net.Conn): Handles stream protocol framing for a single client connection.
 - (s *Server) getOrCreatePartition(topic string, partitionID uint32) (*log.Partition, error): Thread-safely fetches or creates a partition.
 - (s *Server) getPartition(topic string, partitionID uint32) *log.Partition: Thread-safely reads existing partition without creating.
+- (s *Server) topicExists(topic string) bool: Checks whether a topic exists in memory or on disk.
 - (s *Server) writeResponse(conn net.Conn, opCode uint8, payload []byte) error: Sets write deadline and writes framed response.
 - (s *Server) handleProduce(conn net.Conn, payload []byte) error: Appends batch of records to specified partition.
 - (s *Server) handleConsume(conn net.Conn, payload []byte) error: Reads sequential records starting at offset up to max bytes.
@@ -368,6 +369,19 @@ func (s *Server) getPartition(topic string, partitionID uint32) *log.Partition {
 	return nil
 }
 
+func (s *Server) topicExists(topic string) bool {
+	s.mu.RLock()
+	if parts, ok := s.partitions[topic]; ok && len(parts) > 0 {
+		s.mu.RUnlock()
+		return true
+	}
+	s.mu.RUnlock()
+
+	topicDir := filepath.Join(s.cfg.DataDir, "topics", topic)
+	info, err := os.Stat(topicDir)
+	return err == nil && info.IsDir()
+}
+
 
 func (s *Server) writeResponse(conn net.Conn, opCode uint8, payload []byte) error {
 	if s.cfg.WriteTimeout > 0 {
@@ -460,6 +474,8 @@ func (s *Server) handleConsume(conn net.Conn, payload []byte) error {
 		status := protocol.StatusErrPartitionNotFound
 		if closed {
 			status = protocol.StatusErrServerClosed
+		} else if !s.topicExists(req.Topic) {
+			status = protocol.StatusErrTopicNotFound
 		}
 		resp := protocol.EncodeConsumeResp(protocol.ConsumeResp{
 			Status: status,

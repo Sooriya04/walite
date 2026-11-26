@@ -9,7 +9,8 @@ Functions Manifest & Usage:
 - TestServer_StartStop(t *testing.T): Tests server startup, ping-pong roundtrip, and clean shutdown.
 - TestServer_ProduceAndConsume(t *testing.T): Tests network produce batch and consume roundtrip.
 - TestServer_OffsetCommitAndGet(t *testing.T): Tests consumer offset commit and retrieval over TCP.
-- TestServer_PartitionNotFound(t *testing.T): Verifies error response on consuming from uncreated partition.
+- TestServer_PartitionNotFound(t *testing.T): Verifies error response StatusErrPartitionNotFound on consuming from uncreated partition on existing topic.
+- TestServer_TopicNotFound(t *testing.T): Verifies error response StatusErrTopicNotFound on consuming from non-existent topic.
 - TestServer_GracefulShutdownUnblocksIdleClients(t *testing.T): Asserts that Close() immediately unblocks idle client reads in <500ms without leaking goroutines.
 - TestServer_ReadTimeout_StalledOneByte(t *testing.T): Asserts that clients stalling on partial frame bytes are severed when ReadTimeout fires.
 - TestServer_ReadTimeout_CompleteFrame(t *testing.T): Asserts that complete frames transmitted within ReadTimeout succeed.
@@ -258,9 +259,65 @@ func TestServer_PartitionNotFound(t *testing.T) {
 	}
 	defer conn.Close()
 
+	// 1. Produce a record to partition 0 so the topic exists
+	produceReq := protocol.ProduceReq{
+		Topic:       "existing-topic",
+		PartitionID: 0,
+		Records: []*log.Record{
+			{Value: []byte("init")},
+		},
+	}
+	payload := protocol.EncodeProduceReq(produceReq)
+	if err := protocol.WriteFrame(conn, protocol.OpProduceReq, payload); err != nil {
+		t.Fatalf("write produce failed: %v", err)
+	}
+	frame, err := protocol.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read produce resp failed: %v", err)
+	}
+	produceResp, err := protocol.DecodeProduceResp(frame.Payload)
+	if err != nil || produceResp.Status != protocol.StatusOK {
+		t.Fatalf("produce failed: %v, status: %d", err, produceResp.Status)
+	}
+
+	// 2. Consume from uncreated partition 99 on existing topic
+	consumeReq := protocol.ConsumeReq{
+		Topic:       "existing-topic",
+		PartitionID: 99,
+		Offset:      0,
+		MaxBytes:    1024,
+	}
+	payload = protocol.EncodeConsumeReq(consumeReq)
+	if err := protocol.WriteFrame(conn, protocol.OpConsumeReq, payload); err != nil {
+		t.Fatalf("write consume failed: %v", err)
+	}
+
+	frame, err = protocol.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read consume resp failed: %v", err)
+	}
+	consumeResp, err := protocol.DecodeConsumeResp(frame.Payload)
+	if err != nil {
+		t.Fatalf("decode consume resp failed: %v", err)
+	}
+	if consumeResp.Status != protocol.StatusErrPartitionNotFound {
+		t.Fatalf("expected StatusErrPartitionNotFound (%x), got %x", protocol.StatusErrPartitionNotFound, consumeResp.Status)
+	}
+}
+
+func TestServer_TopicNotFound(t *testing.T) {
+	srv, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	conn, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+
 	consumeReq := protocol.ConsumeReq{
 		Topic:       "nonexistent-topic",
-		PartitionID: 99,
+		PartitionID: 0,
 		Offset:      0,
 		MaxBytes:    1024,
 	}
@@ -277,8 +334,8 @@ func TestServer_PartitionNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode consume resp failed: %v", err)
 	}
-	if consumeResp.Status != protocol.StatusErrPartitionNotFound {
-		t.Fatalf("expected StatusErrPartitionNotFound, got %d", consumeResp.Status)
+	if consumeResp.Status != protocol.StatusErrTopicNotFound {
+		t.Fatalf("expected StatusErrTopicNotFound (%x), got %x", protocol.StatusErrTopicNotFound, consumeResp.Status)
 	}
 }
 
