@@ -300,12 +300,20 @@ func (s *Server) getOrCreatePartition(topic string, partitionID uint32) (*log.Pa
 		s.partitions[topic] = make(map[uint32]*log.Partition)
 	}
 
+	flushPolicy := log.SyncNone
+	if s.cfg.SyncAlways {
+		flushPolicy = log.SyncAlways
+	} else if s.cfg.FlushInterval > 0 {
+		flushPolicy = log.SyncInterval
+	}
+
 	partDir := filepath.Join(s.cfg.DataDir, "topics", topic, fmt.Sprintf("partition-%d", partitionID))
 	partCfg := log.PartitionConfig{
 		Directory:          partDir,
 		MaxSegmentBytes:    s.cfg.MaxSegmentBytes,
 		IndexIntervalBytes: s.cfg.IndexIntervalBytes,
 		Flush: log.FlusherConfig{
+			Policy:   flushPolicy,
 			Interval: s.cfg.FlushInterval,
 		},
 	}

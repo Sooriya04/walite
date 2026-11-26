@@ -17,6 +17,7 @@ Functions Manifest & Usage:
 - TestServer_ZeroTimeoutDisablesDeadlines(t *testing.T): Verifies that zero-valued timeouts disable deadline enforcement.
 - TestServer_MultipleConsecutiveFramesRefreshDeadlines(t *testing.T): Verifies deadlines refresh on every frame over long-lived sessions.
 - TestServer_Shutdown_StatusErrServerClosed(t *testing.T): Asserts that produce, consume, offset-get, and offset-commit return StatusErrServerClosed during shutdown.
+- TestServer_PartitionFlusherPolicyConfigured(t *testing.T): Verifies that partition flusher policy is configured to SyncInterval or SyncAlways from server config.
 */
 
 import (
@@ -694,4 +695,60 @@ func TestServer_Shutdown_StatusErrServerClosed(t *testing.T) {
 			t.Fatalf("handleOffsetCommit returned error: %v", err)
 		}
 	})
+}
+
+func TestServer_PartitionFlusherPolicyConfigured(t *testing.T) {
+	dir, err := os.MkdirTemp("", "walite-server-flusher-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Case 1: FlushInterval > 0 should configure SyncInterval policy
+	cfgInterval := Config{
+		Addr:          "127.0.0.1:0",
+		DataDir:       dir,
+		FlushInterval: 100 * time.Millisecond,
+		SyncAlways:    false,
+	}
+	srvInterval, err := NewServer(cfgInterval)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	defer srvInterval.Close()
+
+	partInterval, err := srvInterval.getOrCreatePartition("topic-interval", 0)
+	if err != nil {
+		t.Fatalf("failed to create partition: %v", err)
+	}
+	if partInterval.Flusher() == nil || partInterval.Flusher().Policy() != log.SyncInterval {
+		t.Fatalf("expected flusher policy SyncInterval (%v), got %v", log.SyncInterval, partInterval.Flusher().Policy())
+	}
+
+	// Case 2: SyncAlways = true should configure SyncAlways policy
+	dirSync, err := os.MkdirTemp("", "walite-server-sync-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dirSync)
+
+	cfgSync := Config{
+		Addr:          "127.0.0.1:0",
+		DataDir:       dirSync,
+		FlushInterval: 100 * time.Millisecond,
+		SyncAlways:    true,
+	}
+	srvSync, err := NewServer(cfgSync)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	defer srvSync.Close()
+
+	partSync, err := srvSync.getOrCreatePartition("topic-sync", 0)
+	if err != nil {
+		t.Fatalf("failed to create partition: %v", err)
+	}
+	if partSync.Flusher() == nil || partSync.Flusher().Policy() != log.SyncAlways {
+		t.Fatalf("expected flusher policy SyncAlways (%v), got %v", log.SyncAlways, partSync.Flusher().Policy())
+	}
 }
