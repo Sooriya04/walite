@@ -15,26 +15,31 @@ import (
 
 // Config holds operational settings for the walited server.
 type Config struct {
-	Addr               string
-	DataDir            string
-	MaxSegmentBytes    uint64
-	IndexIntervalBytes uint32
-	FlushInterval      time.Duration
-	SyncAlways         bool
-	ReadTimeout        time.Duration
-	WriteTimeout       time.Duration
+	Addr                string
+	DataDir             string
+	MaxSegmentBytes     uint64
+	IndexIntervalBytes  uint32
+	FlushInterval       time.Duration
+	SyncAlways          bool
+	ReadTimeout         time.Duration
+	WriteTimeout        time.Duration
+	OffsetRetentionAge  time.Duration
+	OffsetMaxBytes      uint64
+	OffsetCleanInterval time.Duration
 }
 
 // DefaultConfig returns production-ready default server configuration.
 func DefaultConfig() Config {
 	return Config{
-		Addr:               ":9092",
-		DataDir:            "./data",
-		MaxSegmentBytes:    10 * 1024 * 1024, // 10MB
-		IndexIntervalBytes: 4096,             // 4KB
-		FlushInterval:      500 * time.Millisecond,
-		SyncAlways:         false,
-		ReadTimeout:        30 * time.Second,
-		WriteTimeout:       30 * time.Second,
+		Addr:                ":9092",
+		DataDir:             "./data",
+		MaxSegmentBytes:     10 * 1024 * 1024, // 10MB
+		IndexIntervalBytes:  4096,             // 4KB
+		FlushInterval:       500 * time.Millisecond,
+		SyncAlways:          false,
+		ReadTimeout:         30 * time.Second,
+		WriteTimeout:        30 * time.Second,
+		OffsetRetentionAge:  24 * time.Hour,
+		OffsetCleanInterval: 10 * time.Minute,
 	}
 }

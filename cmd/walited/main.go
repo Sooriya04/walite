@@ -27,17 +27,21 @@ func main() {
 	maxSegment := flag.Uint64("max-segment", 10*1024*1024, "Maximum segment size in bytes before rollover")
 	flushInterval := flag.Duration("flush", 500*time.Millisecond, "Background physical flush interval")
 	syncAlways := flag.Bool("sync", false, "Force physical fsync on every append")
+	offsetRetention := flag.Duration("offset-retention", 24*time.Hour, "Retention age for consumer group offset segments (0 = disabled)")
+	offsetCleanInterval := flag.Duration("offset-clean-interval", 10*time.Minute, "Background GC interval for consumer offsets")
 	flag.Parse()
 
 	cfg := server.Config{
-		Addr:               *addr,
-		DataDir:            *dataDir,
-		MaxSegmentBytes:    *maxSegment,
-		IndexIntervalBytes: 4096,
-		FlushInterval:      *flushInterval,
-		SyncAlways:         *syncAlways,
-		ReadTimeout:        30 * time.Second,
-		WriteTimeout:       30 * time.Second,
+		Addr:                *addr,
+		DataDir:             *dataDir,
+		MaxSegmentBytes:     *maxSegment,
+		IndexIntervalBytes:  4096,
+		FlushInterval:       *flushInterval,
+		SyncAlways:          *syncAlways,
+		ReadTimeout:         30 * time.Second,
+		WriteTimeout:        30 * time.Second,
+		OffsetRetentionAge:  *offsetRetention,
+		OffsetCleanInterval: *offsetCleanInterval,
 	}
 
 	srv, err := server.NewServer(cfg)

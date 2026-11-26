@@ -13,6 +13,8 @@ Functions Manifest & Usage:
 - (om *OffsetManager) TruncateBefore(targetOffset uint64) (int, error): Truncates checkpoint partition segments before targetOffset.
 - (om *OffsetManager) Sync() error: Flushes checkpoint log partition to physical storage.
 - (om *OffsetManager) Close() error: Closes underlying partition and seals cache.
+- (om *OffsetManager) Config() OffsetManagerConfig: Returns the operational configuration of the offset manager.
+- (om *OffsetManager) Partition() *log.Partition: Returns the underlying commit partition for checkpoint storage.
 */
 
 import (
@@ -208,5 +210,19 @@ func (om *OffsetManager) Close() error {
 	}
 	om.closed = true
 	return om.partition.Close()
+}
+
+// Config returns the operational configuration of the offset manager.
+func (om *OffsetManager) Config() OffsetManagerConfig {
+	om.mu.RLock()
+	defer om.mu.RUnlock()
+	return om.cfg
+}
+
+// Partition returns the underlying commit partition for checkpoint storage.
+func (om *OffsetManager) Partition() *log.Partition {
+	om.mu.RLock()
+	defer om.mu.RUnlock()
+	return om.partition
 }
 

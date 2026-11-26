@@ -72,3 +72,11 @@ func (c *Cleaner) Stop() {
 		}
 	})
 }
+
+// Config returns the configured retention policy parameters.
+func (c *Cleaner) Config() CleanerConfig {
+	if c == nil {
+		return CleanerConfig{}
+	}
+	return c.cfg
+}

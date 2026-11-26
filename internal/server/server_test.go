@@ -19,6 +19,7 @@ Functions Manifest & Usage:
 - TestServer_Shutdown_StatusErrServerClosed(t *testing.T): Asserts that produce, consume, offset-get, and offset-commit return StatusErrServerClosed during shutdown.
 - TestServer_PartitionFlusherPolicyConfigured(t *testing.T): Verifies that partition flusher policy is configured to SyncInterval or SyncAlways from server config.
 - TestServer_ConsumeMaxBytesClampedToMaxFrameBytes(t *testing.T): Asserts that excessive MaxBytes values in ConsumeReq are clamped to prevent exceeding protocol.MaxFrameBytes ceiling.
+- TestServer_OffsetManagerCleanerConfigured(t *testing.T): Verifies that OffsetRetentionAge and OffsetCleanInterval are wired into OffsetManager cleaner.
 */
 
 import (
@@ -820,5 +821,52 @@ func TestServer_ConsumeMaxBytesClampedToMaxFrameBytes(t *testing.T) {
 		if len(consumeResp.Records) != 3 {
 			t.Fatalf("expected 3 records, got %d", len(consumeResp.Records))
 		}
+	}
+}
+
+func TestServer_OffsetManagerCleanerConfigured(t *testing.T) {
+	dir, err := os.MkdirTemp("", "walite-server-om-cleaner-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := Config{
+		Addr:                "127.0.0.1:0",
+		DataDir:             dir,
+		OffsetRetentionAge:  48 * time.Hour,
+		OffsetMaxBytes:      50 * 1024 * 1024,
+		OffsetCleanInterval: 15 * time.Minute,
+	}
+
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	defer srv.Close()
+
+	om := srv.OffsetManager()
+	if om == nil {
+		t.Fatalf("expected non-nil OffsetManager")
+	}
+
+	omCfg := om.Config()
+	if omCfg.Cleaner.MaxRetentionAge != 48*time.Hour {
+		t.Fatalf("expected MaxRetentionAge 48h, got %v", omCfg.Cleaner.MaxRetentionAge)
+	}
+	if omCfg.Cleaner.MaxPartitionBytes != 50*1024*1024 {
+		t.Fatalf("expected MaxPartitionBytes 50MB, got %v", omCfg.Cleaner.MaxPartitionBytes)
+	}
+	if omCfg.Cleaner.CleanInterval != 15*time.Minute {
+		t.Fatalf("expected CleanInterval 15m, got %v", omCfg.Cleaner.CleanInterval)
+	}
+
+	// Verify partition cleaner attached
+	part := om.Partition()
+	if part == nil || part.Cleaner() == nil {
+		t.Fatalf("expected non-nil Cleaner attached to offset partition")
+	}
+	if part.Cleaner().Config().CleanInterval != 15*time.Minute {
+		t.Fatalf("expected Cleaner Config CleanInterval 15m, got %v", part.Cleaner().Config().CleanInterval)
 	}
 }

@@ -9,6 +9,7 @@ Functions Manifest & Usage:
 - NewServer(cfg Config) (*Server, error): Bootstraps a new walited server with partition registry and offset manager.
 - (s *Server) Start() error: Binds TCP listener and launches the concurrent connection accept loop.
 - (s *Server) Addr() net.Addr: Returns the bound network address of the listener.
+- (s *Server) OffsetManager() *consumer.OffsetManager: Returns the underlying consumer offset manager.
 - (s *Server) Close() error: Gracefully halts connection acceptance, flushes partitions to disk, and closes resources.
 - (s *Server) acceptLoop(): Continuously accepts inbound client TCP connections until shutdown.
 - (s *Server) handleConn(conn net.Conn): Handles stream protocol framing for a single client connection.
@@ -63,10 +64,19 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	omDir := filepath.Join(cfg.DataDir, "__consumer_offsets")
+	cleanerCfg := log.CleanerConfig{
+		MaxRetentionAge:   cfg.OffsetRetentionAge,
+		MaxPartitionBytes: cfg.OffsetMaxBytes,
+		CleanInterval:     cfg.OffsetCleanInterval,
+	}
+	if cleanerCfg.CleanInterval <= 0 && (cleanerCfg.MaxRetentionAge > 0 || cleanerCfg.MaxPartitionBytes > 0) {
+		cleanerCfg.CleanInterval = 10 * time.Minute
+	}
 	omCfg := consumer.OffsetManagerConfig{
 		Directory:       omDir,
 		SyncOnCommit:    cfg.SyncAlways,
 		MaxSegmentBytes: cfg.MaxSegmentBytes,
+		Cleaner:         cleanerCfg,
 	}
 	om, err := consumer.OpenOffsetManager(omCfg)
 	if err != nil {
@@ -142,6 +152,13 @@ func (s *Server) Addr() net.Addr {
 		return nil
 	}
 	return s.listener.Addr()
+}
+
+// OffsetManager returns the underlying consumer offset manager.
+func (s *Server) OffsetManager() *consumer.OffsetManager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.offsetMgr
 }
 
 // Close gracefully terminates the server, halting listeners, closing client sockets, draining workers, and syncing storage.
