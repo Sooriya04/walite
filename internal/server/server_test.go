@@ -18,6 +18,7 @@ Functions Manifest & Usage:
 - TestServer_MultipleConsecutiveFramesRefreshDeadlines(t *testing.T): Verifies deadlines refresh on every frame over long-lived sessions.
 - TestServer_Shutdown_StatusErrServerClosed(t *testing.T): Asserts that produce, consume, offset-get, and offset-commit return StatusErrServerClosed during shutdown.
 - TestServer_PartitionFlusherPolicyConfigured(t *testing.T): Verifies that partition flusher policy is configured to SyncInterval or SyncAlways from server config.
+- TestServer_ConsumeMaxBytesClampedToMaxFrameBytes(t *testing.T): Asserts that excessive MaxBytes values in ConsumeReq are clamped to prevent exceeding protocol.MaxFrameBytes ceiling.
 */
 
 import (
@@ -750,5 +751,74 @@ func TestServer_PartitionFlusherPolicyConfigured(t *testing.T) {
 	}
 	if partSync.Flusher() == nil || partSync.Flusher().Policy() != log.SyncAlways {
 		t.Fatalf("expected flusher policy SyncAlways (%v), got %v", log.SyncAlways, partSync.Flusher().Policy())
+	}
+}
+
+func TestServer_ConsumeMaxBytesClampedToMaxFrameBytes(t *testing.T) {
+	srv, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	conn, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("failed to dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Produce 3 sample records
+	records := []*log.Record{
+		{Key: []byte("k1"), Value: []byte("v1-payload")},
+		{Key: []byte("k2"), Value: []byte("v2-payload")},
+		{Key: []byte("k3"), Value: []byte("v3-payload")},
+	}
+	produceReq := protocol.ProduceReq{
+		Topic:       "large-batch",
+		PartitionID: 0,
+		Records:     records,
+	}
+	payload := protocol.EncodeProduceReq(produceReq)
+	if err := protocol.WriteFrame(conn, protocol.OpProduceReq, payload); err != nil {
+		t.Fatalf("write produce failed: %v", err)
+	}
+
+	frame, err := protocol.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read produce resp failed: %v", err)
+	}
+	produceResp, err := protocol.DecodeProduceResp(frame.Payload)
+	if err != nil || produceResp.Status != protocol.StatusOK {
+		t.Fatalf("produce failed: %v, status: %d", err, produceResp.Status)
+	}
+
+	// Consume with oversized MaxBytes (32MB and 0xFFFFFFFF)
+	for _, excessiveMaxBytes := range []uint32{32 * 1024 * 1024, 0xFFFFFFFF} {
+		consumeReq := protocol.ConsumeReq{
+			Topic:       "large-batch",
+			PartitionID: 0,
+			Offset:      0,
+			MaxBytes:    excessiveMaxBytes,
+		}
+		consumePayload := protocol.EncodeConsumeReq(consumeReq)
+		if err := protocol.WriteFrame(conn, protocol.OpConsumeReq, consumePayload); err != nil {
+			t.Fatalf("write consume failed: %v", err)
+		}
+
+		respFrame, err := protocol.ReadFrame(conn)
+		if err != nil {
+			t.Fatalf("read consume resp with MaxBytes %d failed with framing error: %v", excessiveMaxBytes, err)
+		}
+		if respFrame.OpCode != protocol.OpConsumeResp {
+			t.Fatalf("expected OpConsumeResp, got %x", respFrame.OpCode)
+		}
+
+		consumeResp, err := protocol.DecodeConsumeResp(respFrame.Payload)
+		if err != nil {
+			t.Fatalf("decode consume resp failed: %v", err)
+		}
+		if consumeResp.Status != protocol.StatusOK {
+			t.Fatalf("expected StatusOK, got %d", consumeResp.Status)
+		}
+		if len(consumeResp.Records) != 3 {
+			t.Fatalf("expected 3 records, got %d", len(consumeResp.Records))
+		}
 	}
 }

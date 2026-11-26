@@ -469,6 +469,11 @@ func (s *Server) handleConsume(conn net.Conn, payload []byte) error {
 		return s.writeResponse(conn, protocol.OpConsumeResp, resp)
 	}
 
+	maxAllowedBytes := protocol.MaxFrameBytes - 1024
+	if req.MaxBytes > maxAllowedBytes {
+		req.MaxBytes = maxAllowedBytes
+	}
+
 	var records []*log.Record
 	var accumulatedBytes uint32
 	currentOffset := req.Offset
@@ -489,6 +494,13 @@ func (s *Server) handleConsume(conn net.Conn, payload []byte) error {
 		}
 
 		recBytes := uint32(log.HeaderSize + len(rec.Key) + len(rec.Value))
+		if recBytes > maxAllowedBytes {
+			resp := protocol.EncodeConsumeResp(protocol.ConsumeResp{
+				Status: protocol.StatusErrCorruptRecord,
+			})
+			return s.writeResponse(conn, protocol.OpConsumeResp, resp)
+		}
+
 		if len(records) > 0 && accumulatedBytes+recBytes > req.MaxBytes {
 			break
 		}
